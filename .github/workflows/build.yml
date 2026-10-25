@@ -13,8 +13,8 @@ permissions:
   contents: read
 
 jobs:
-  build-windows:
-    name: Build DecompileX (Windows)
+  build:
+    name: Windows x64
     runs-on: windows-latest
 
     defaults:
@@ -27,14 +27,19 @@ jobs:
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
 
       - name: Configure CMake
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
       - name: Build DecompileX
         run: |
-          cmake --build build --config Release --parallel
+          cmake --build build --parallel
 
       - name: Verify Executable
         run: |
@@ -43,7 +48,7 @@ jobs:
             exit 1
           }
 
-          Write-Host "DecompileX.exe generated successfully!"
+          Write-Host "Build successful!"
           Get-Item "build/bin/DecompileX.exe"
 
       - name: Package Build
@@ -52,7 +57,7 @@ jobs:
           Copy-Item "build/bin/DecompileX.exe" "dist/DecompileX.exe"
           Compress-Archive -Path "dist/DecompileX.exe" -DestinationPath "DecompileX-Windows-x64.zip" -Force
 
-      - name: Upload Windows Artifact
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DecompileX-Windows-x64
