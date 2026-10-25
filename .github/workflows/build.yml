@@ -56,7 +56,7 @@ jobs:
           Copy-Item "build/bin/DecompileX.exe" "dist/DecompileX.exe"
           Compress-Archive -Path "dist/DecompileX.exe" -DestinationPath "DecompileX-Windows-x64.zip" -Force
 
-      - name: Upload Artifact
+      - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DecompileX-Windows-x64
@@ -68,22 +68,42 @@ jobs:
     name: Android ARM64
     runs-on: ubuntu-latest
 
+    env:
+      NDK_VERSION: 27.2.12479018
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android NDK
+      - name: Setup Android NDK
         run: |
-          sdkmanager --install "ndk;27.2.12479018"
+          set -e
+
+          echo "Android SDK: $ANDROID_HOME"
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Android SDK Manager not found!"
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+
+          "$SDKMANAGER" --install "ndk;$NDK_VERSION"
+
+          NDK_PATH="$ANDROID_HOME/ndk/$NDK_VERSION"
+
+          if [ ! -f "$NDK_PATH/build/cmake/android.toolchain.cmake" ]; then
+            echo "Android NDK installation failed!"
+            exit 1
+          fi
+
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
 
       - name: Setup Ninja
         run: |
@@ -94,7 +114,7 @@ jobs:
         run: |
           cmake -S . -B build-android \
             -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
             -DCMAKE_BUILD_TYPE=Release
@@ -116,7 +136,7 @@ jobs:
           cd dist
           zip -9 ../DecompileX-Android-ARM64.zip DecompileX
 
-      - name: Upload Artifact
+      - name: Upload Android Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DecompileX-Android-ARM64
