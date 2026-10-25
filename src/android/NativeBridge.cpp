@@ -1,3 +1,4 @@
+#include "backend/PspAnalyzer.hpp"
 #include "backend/ISOCompiler.hpp"
 #include <filesystem>
 #include <exception>
@@ -258,5 +259,18 @@ Java_com_decompilex_app_MainActivity_compileIsoNative(JNIEnv* env, jobject,
         return env->NewStringUTF(response.c_str());
     } catch (...) {
         return env->NewStringUTF("Unknown native ISO error.");
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_decompilex_app_MainActivity_analyzePspBytes(JNIEnv* env, jobject, jbyteArray input) {
+    if (!input) return env->NewStringUTF("No PSP executable selected.");
+    if (env->GetArrayLength(input) > 64 * 1024 * 1024)
+        return env->NewStringUTF("PSP executable exceeds 64 MiB in-memory analysis limit.");
+    try {
+        auto report = DecompileX::PspAnalyzer::analyze(bytes(env, input), 160);
+        return result(env, report);
+    } catch (const std::exception& e) {
+        return result(env, std::string("PSP analysis failed: ") + e.what());
     }
 }
