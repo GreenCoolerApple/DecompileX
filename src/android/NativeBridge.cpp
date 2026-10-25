@@ -1,3 +1,4 @@
+#include "backend/IsoCodeScanner.hpp"
 #include "backend/PspAnalyzer.hpp"
 #include "backend/ISOCompiler.hpp"
 #include <filesystem>
@@ -272,5 +273,16 @@ Java_com_decompilex_app_MainActivity_analyzePspBytes(JNIEnv* env, jobject, jbyte
         return result(env, report);
     } catch (const std::exception& e) {
         return result(env, std::string("PSP analysis failed: ") + e.what());
+    }
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_decompilex_app_MainActivity_scanIsoCodeNative(JNIEnv* env, jobject, jint fd) {
+    if (fd < 0) return env->NewStringUTF("Invalid ISO descriptor.");
+    try {
+        auto report = DecompileX::IsoCodeScanner::scan("/proc/self/fd/" + std::to_string(fd));
+        return result(env, report.formatText());
+    } catch (const std::exception& e) {
+        return result(env, std::string("ISO scan failed: ") + e.what());
     }
 }
