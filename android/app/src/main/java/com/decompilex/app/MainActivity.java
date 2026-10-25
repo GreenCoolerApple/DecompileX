@@ -5,6 +5,11 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Color;
 import android.database.Cursor;
+import android.provider.DocumentsContract.Document;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.util.HashSet;
+import java.util.Set;
 import android.provider.OpenableColumns;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -34,6 +39,11 @@ public class MainActivity extends Activity {
     private static final int OPEN_COMPARE = 101;
     private static final int SAVE_BIN = 102;
     private static final int SAVE_REPORT = 103;
+    private static final int PICK_ISO_TREE = 104;
+    private static final int SAVE_ISO = 105;
+    private static final long MAX_ISO_INPUT = 512L * 1024 * 1024;
+    private static final int MAX_ISO_ENTRIES = 2000;
+    private Uri isoTree;
     private static final int MAX_BYTES = 16 * 1024 * 1024;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final int bg = Color.rgb(10, 15, 22);
@@ -55,6 +65,7 @@ public class MainActivity extends Activity {
     private native String compareBytes(byte[] first, byte[] second);
     private native byte[] hexToBytes(String hex);
     private native String findHex(byte[] data, String pattern);
+    private native String compileIsoNative(String source, String destination, String label);
 
     @Override
     public void onCreate(Bundle state) {
@@ -128,6 +139,15 @@ public class MainActivity extends Activity {
         Button bin = button("CREATE .BIN FROM HEX", false);
         root.addView(bin);
         bin.setOnClickListener(v -> createBinary());
+
+        section(root, "ISO 9660 BUILDER");
+        Button isoButton = button("CREATE ISO FROM FOLDER", false);
+        root.addView(isoButton);
+        isoButton.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(intent, PICK_ISO_TREE);
+        });
 
         section(root, "REPORT TOOLS");
         Button saveReport = button("EXPORT REPORT AS .TXT", false);
@@ -264,6 +284,101 @@ public class MainActivity extends Activity {
             }).show();
     }
 
+    private void requestIsoDestination(Uri tree) {
+        isoTree = tree;
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("application/octet-stream");
+        intent.putExtra(Intent.EXTRA_TITLE, "DecompileX.iso");
+        startActivityForResult(intent, SAVE_ISO);
+    }
+
+    private static final class IsoCopyState {
+        long bytes;
+        int entries;
+    }
+
+    private void stageIsoFolder(Uri tree, String documentId, File target,
+                                IsoCopyState state, int depth) throws Exception {
+        if (depth > 32) throw new Exception("Folder nesting exceeds 32 levels.");
+        if (!target.isDirectory() && !target.mkdirs()) throw new Exception("Cannot create staging folder.");
+        Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, documentId);
+        String[] projection = {Document.COLUMN_DOCUMENT_ID, Document.COLUMN_DISPLAY_NAME,
+                Document.COLUMN_MIME_TYPE, Document.COLUMN_SIZE};
+        Set<String> used = new HashSet<>();
+        try (Cursor cursor = getContentResolver().query(children, projection, null, null, null)) {
+            if (cursor == null) throw new Exception("Cannot list selected folder.");
+            while (cursor.moveToNext()) {
+                if (++state.entries > MAX_ISO_ENTRIES) throw new Exception("Too many files or folders.");
+                String id = cursor.getString(0);
+                String name = cursor.getString(1);
+                String mime = cursor.getString(2);
+                if (name == null || name.isEmpty() || name.equals(".") || name.equals("..") ||
+                        name.contains("/") || name.contains("\\") || name.indexOf('\0') >= 0)
+                    throw new Exception("Unsafe filename in selected folder.");
+                if (!used.add(name)) throw new Exception("Duplicate filename: " + name);
+                File child = new File(target, name);
+                if (Document.MIME_TYPE_DIR.equals(mime)) {
+                    stageIsoFolder(tree, id, child, state, depth + 1);
+                } else {
+                    Uri item = DocumentsContract.buildDocumentUriUsingTree(tree, id);
+                    try (InputStream input = getContentResolver().openInputStream(item);
+                         FileOutputStream output = new FileOutputStream(child)) {
+                        if (input == null) throw new Exception("Cannot read " + name);
+                        byte[] buffer = new byte[65536];
+                        int count;
+                        while ((count = input.read(buffer)) != -1) {
+                            if (Thread.currentThread().isInterrupted()) throw new Exception("Operation interrupted.");
+                            state.bytes += count;
+                            if (state.bytes > MAX_ISO_INPUT) throw new Exception("ISO input exceeds 512 MB.");
+                            output.write(buffer, 0, count);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void removeTemporary(File file) {
+        if (file == null || !file.exists()) return;
+        File[] children = file.listFiles();
+        if (children != null) for (File child : children) removeTemporary(child);
+        file.delete();
+    }
+
+    private void createIso(Uri tree, Uri destination) {
+        showResult("ISO 9660", "Preparing files and generating ISO... Please wait.");
+        worker.execute(() -> {
+            File staging = null;
+            try {
+                staging = new File(getCacheDir(), "iso-" + java.util.UUID.randomUUID());
+                File input = new File(staging, "source");
+                File iso = new File(staging, "result.iso");
+                if (!staging.mkdirs()) throw new Exception("Cannot create temporary workspace.");
+                IsoCopyState state = new IsoCopyState();
+                stageIsoFolder(tree, DocumentsContract.getTreeDocumentId(tree), input, state, 0);
+                String nativeResult = compileIsoNative(input.getAbsolutePath(), iso.getAbsolutePath(), "DECOMPILEX");
+                if (nativeResult == null || !nativeResult.startsWith("OK|"))
+                    throw new Exception(nativeResult == null ? "Native ISO compiler failed." : nativeResult);
+                try (InputStream source = new java.io.FileInputStream(iso);
+                     OutputStream target = getContentResolver().openOutputStream(destination, "w")) {
+                    if (target == null) throw new Exception("Cannot write selected destination.");
+                    byte[] buffer = new byte[65536];
+                    int count;
+                    while ((count = source.read(buffer)) != -1) target.write(buffer, 0, count);
+                    target.flush();
+                }
+                String message = nativeResult.substring(3) + "\nSource bytes: " + state.bytes;
+                runOnUiThread(() -> showResult("ISO CREATED", message));
+            } catch (Exception error) {
+                String message = error.getMessage();
+                runOnUiThread(() -> showResult("ISO ERROR", message == null ? "Unknown error" : message));
+            } finally {
+                removeTemporary(staging);
+            }
+        });
+    }
+
     @Override
     protected void onDestroy() {
         worker.shutdownNow();
@@ -296,6 +411,15 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         try {
+            if (requestCode == PICK_ISO_TREE) {
+                requestIsoDestination(data.getData());
+                return;
+            }
+            if (requestCode == SAVE_ISO) {
+                if (isoTree != null) createIso(isoTree, data.getData());
+                isoTree = null;
+                return;
+            }
             if (requestCode == SAVE_REPORT) {
                 byte[] report = currentReport.getBytes(StandardCharsets.UTF_8);
                 try (OutputStream stream = getContentResolver().openOutputStream(data.getData(), "wt")) {
