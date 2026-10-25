@@ -42,6 +42,7 @@ public class MainActivity extends Activity {
     private static final int PICK_ISO_TREE = 104;
     private static final int SAVE_ISO = 105;
     private static final int OPEN_ISO = 106;
+    private static final int OPEN_PSP_EXEC = 108;
     private static final int EXTRACT_ISO = 107;
     private Uri selectedIso;
     private static final long MAX_ISO_INPUT = 512L * 1024 * 1024;
@@ -68,6 +69,7 @@ public class MainActivity extends Activity {
     private native String compareBytes(byte[] first, byte[] second);
     private native byte[] hexToBytes(String hex);
     private native String findHex(byte[] data, String pattern);
+    private native String analyzePspBytes(byte[] data);
     private native String compileIsoNative(String source, String destination, String label);
 
     @Override
@@ -164,6 +166,14 @@ public class MainActivity extends Activity {
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             startActivityForResult(intent, EXTRACT_ISO);
         });
+
+        section(root, "PSP GAME CODE ANALYZER");
+        Button pspExecutable = button("OPEN PSP EBOOT.PBP / EBOOT.BIN / ELF", false);
+        root.addView(pspExecutable);
+        pspExecutable.setOnClickListener(v -> openDocument(OPEN_PSP_EXEC));
+        Button pspIso = button("SCAN OPENED PSP ISO FOR EXECUTABLES", false);
+        root.addView(pspIso);
+        pspIso.setOnClickListener(v -> scanPspIso());
 
         section(root, "REPORT TOOLS");
         Button saveReport = button("EXPORT REPORT AS .TXT", false);
@@ -395,6 +405,66 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void scanPspIso() {
+        Uri source = selectedIso;
+        if (source == null) { showMessage("Open a PSP ISO first."); return; }
+        showResult("PSP ISO SCANNER", "Scanning executable entries...");
+        worker.execute(() -> {
+            try (IsoReader reader = new IsoReader(getContentResolver(), source)) {
+                StringBuilder report = new StringBuilder("PSP ISO executable scan\n\n");
+                int matches = 0;
+                for (IsoReader.Entry entry : reader.getEntries()) {
+                    if (entry.directory) continue;
+                    String name = entry.path.toUpperCase(java.util.Locale.ROOT);
+                    if (!(name.endsWith("EBOOT.BIN") || name.endsWith("BOOT.BIN") ||
+                          name.endsWith("EBOOT.PBP") || name.endsWith(".ELF") || name.endsWith(".PRX"))) continue;
+                    matches++;
+                    report.append("FILE: ").append(entry.path).append("\nSize: ").append(entry.size).append(" bytes\n");
+                    if (entry.size > 64L * 1024 * 1024) {
+                        report.append("Too large for in-memory disassembly (64 MiB limit).\n\n");
+                    } else {
+                        byte[] bytes = reader.readEntry(entry, 64 * 1024 * 1024);
+                        report.append(analyzePspBytes(bytes)).append("\n\n");
+                    }
+                    if (report.length() > 120000) { report.append("Output truncated.\n"); break; }
+                }
+                if (matches == 0) report.append("No matching executable names found.\n");
+                String result = report.toString();
+                runOnUiThread(() -> showResult("PSP GAME CODE ANALYZER", result));
+            } catch (Exception error) {
+                runOnUiThread(() -> showResult("PSP ANALYSIS ERROR", String.valueOf(error.getMessage())));
+            }
+        });
+    }
+
+    private void inspectPspExecutable(Uri uri) {
+        showResult("PSP EXECUTABLE", "Loading and decoding PSP executable...");
+        worker.execute(() -> {
+            try {
+                byte[] content = readPspDocument(uri);
+                String report = analyzePspBytes(content);
+                runOnUiThread(() -> showResult("PSP EXECUTABLE: " + documentName(uri), report));
+            } catch (Exception error) {
+                runOnUiThread(() -> showResult("PSP ANALYSIS ERROR", String.valueOf(error.getMessage())));
+            }
+        });
+    }
+
+    private byte[] readPspDocument(Uri uri) throws Exception {
+        try (InputStream stream = getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
+            if (stream == null) throw new Exception("Unable to open PSP executable.");
+            byte[] chunk = new byte[65536];
+            int count;
+            while ((count = stream.read(chunk)) != -1) {
+                if (buffer.size() > 64 * 1024 * 1024 - count)
+                    throw new Exception("PSP executable exceeds the 64 MiB analysis limit.");
+                buffer.write(chunk, 0, count);
+            }
+            return buffer.toByteArray();
+        }
+    }
+
     private void inspectIso(Uri uri) {
         showResult("OPEN ISO", "Reading ISO 9660 directory structure...");
         worker.execute(() -> {
@@ -458,6 +528,10 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         try {
+            if (requestCode == OPEN_PSP_EXEC) {
+                inspectPspExecutable(data.getData());
+                return;
+            }
             if (requestCode == OPEN_ISO) {
                 inspectIso(data.getData());
                 return;
