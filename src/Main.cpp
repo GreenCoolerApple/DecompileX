@@ -1,6 +1,7 @@
 #include "backend/ExeCompiler.hpp"
 #include "backend/ZipGenerator.hpp"
 #include "backend/ISOCompiler.hpp"
+#include "backend/BinCompiler.hpp"
 
 #include <algorithm>
 #include <array>
@@ -283,7 +284,7 @@ namespace
     {
         std::cout << color("1;92")
                   << "\n  +============================================================+\n"
-                  << "  |  D E C O M P I L E X                         v0.3.0     |\n"
+                  << "  |  D E C O M P I L E X                         v0.4.0     |\n"
                   << "  |  BINARY FORENSICS  /  ARCHIVE LAB  /  BUILD STUDIO        |\n"
                   << "  +============================================================+\n"
                   << color("0")
@@ -302,7 +303,9 @@ namespace
                   << "  13  CRC32 checksum             14  Compare two binaries\n"
                   << "  15  Search hexadecimal bytes\n\n"
                   << color("1;92") << "  [ ARCHIVE LAB ]" << color("0") << "\n"
-                  << "   7  Create ZIP                  8  Create ISO 9660\n\n"
+                  << "   7  Create ZIP                  8  Create ISO 9660\n"
+                  << "  17  Hex to BIN                  18  Text to BIN\n"
+                  << "  19  Merge binary files          20  BIN to hex preview\n\n"
                   << color("1;92") << "  [ BUILD STUDIO ]" << color("0") << "\n"
                   << "   9  Compile C++                10  Detect compilers\n\n"
                   << color("1;92") << "  [ UTILITIES ]" << color("0") << "\n"
@@ -518,6 +521,10 @@ namespace
                   << "  DecompileX --crc32 <file>\n"
                   << "  DecompileX --compare <file-a> <file-b>\n"
                   << "  DecompileX --findhex <file> <hex-pattern>\n"
+                  << "  DecompileX --bin-hex <hex> <output.bin>\n"
+                  << "  DecompileX --bin-text <text> <output.bin>\n"
+                  << "  DecompileX --bin-merge <output.bin> <input1> <input2> [...]\n"
+                  << "  DecompileX --bin-view <file> [max-bytes]\n"
                   << "  ISO output must be outside its source directory.\n";
     }
 
@@ -610,6 +617,61 @@ namespace
             std::cout << "Output: " << result.output.string() << '\n';
     }
 
+    void printBinResult(const DecompileX::BinResult& result)
+    {
+        if (!result.success)
+            throw std::runtime_error(result.message);
+        std::cout << "  [OK] " << result.message << "\n"
+                  << "  Output: " << result.output.string() << "\n"
+                  << "  Bytes written: " << result.bytesWritten << "\n";
+    }
+
+    void createBinHex()
+    {
+        const auto hex = prompt("Hexadecimal bytes: ");
+        const auto output = prompt("Output .bin path: ");
+        if (output.empty()) throw std::runtime_error("Output path required.");
+        printBinResult(DecompileX::BinCompiler::compileHex(hex, output));
+    }
+
+    void createBinText()
+    {
+        const auto value = prompt("Text to encode as bytes: ");
+        const auto output = prompt("Output .bin path: ");
+        if (output.empty()) throw std::runtime_error("Output path required.");
+        printBinResult(DecompileX::BinCompiler::compileText(value, output));
+    }
+
+    void mergeBinaries()
+    {
+        const auto output = prompt("Output .bin path: ");
+        if (output.empty()) throw std::runtime_error("Output path required.");
+        std::vector<fs::path> inputs;
+        std::cout << "Enter input paths in order; empty line to finish.\n";
+        while (true)
+        {
+            const auto path = prompt("Input: ");
+            if (path.empty()) break;
+            inputs.emplace_back(path);
+        }
+        if (inputs.empty()) throw std::runtime_error("No input files provided.");
+        printBinResult(DecompileX::BinCompiler::merge(inputs, output));
+    }
+
+    void previewBin(const fs::path& path, std::size_t maxBytes)
+    {
+        if (maxBytes == 0 || maxBytes > 4096)
+            throw std::runtime_error("Byte count must be between 1 and 4096.");
+        std::ifstream input(path, std::ios::binary);
+        if (!input) throw std::runtime_error("Cannot open input file.");
+        std::vector<std::uint8_t> bytes(maxBytes);
+        input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (input.bad()) throw std::runtime_error("Failed to read input file.");
+        bytes.resize(static_cast<std::size_t>(input.gcount()));
+        std::cout << "  Bytes read: " << bytes.size() << "\n"
+                  << DecompileX::BinCompiler::toHex(bytes) << "\n";
+    }
+
     int runInteractive()
     {
         std::optional<BinaryInfo> current;
@@ -696,6 +758,18 @@ namespace
                     const auto pattern = parseHexBytes(prompt("Hex pattern (e.g. 4D 5A): "));
                     heading("HEX PATTERN SEARCH"); searchBytes(current->path, pattern);
                 }
+                else if (choice == "17") { heading("HEX TO BINARY"); createBinHex(); }
+                else if (choice == "18") { heading("TEXT TO BINARY"); createBinText(); }
+                else if (choice == "19") { heading("MERGE BINARIES"); mergeBinaries(); }
+                else if (choice == "20")
+                {
+                    heading("BINARY HEX PREVIEW");
+                    const auto file = prompt("Input file: ");
+                    const auto count = prompt("Max bytes [256]: ");
+                    const auto parsed = count.empty() ? std::optional<std::uint64_t>(256) : parseUnsigned(count);
+                    if (!parsed || *parsed == 0 || *parsed > 4096) throw std::runtime_error("Invalid byte count.");
+                    previewBin(file, static_cast<std::size_t>(*parsed));
+                }
                 else if (choice == "16")
                 {
                     heading("WORKSPACE DASHBOARD");
@@ -746,6 +820,30 @@ int main(int argc, char** argv)
             return 0;
         }
         if (command == "--entropy" && argc == 3) { showEntropy(argv[2]); return 0; }
+        if (command == "--bin-hex" && argc == 4)
+        {
+            printBinResult(DecompileX::BinCompiler::compileHex(argv[2], argv[3]));
+            return 0;
+        }
+        if (command == "--bin-text" && argc == 4)
+        {
+            printBinResult(DecompileX::BinCompiler::compileText(argv[2], argv[3]));
+            return 0;
+        }
+        if (command == "--bin-merge" && argc >= 5)
+        {
+            std::vector<fs::path> inputs;
+            for (int i = 3; i < argc; ++i) inputs.emplace_back(argv[i]);
+            printBinResult(DecompileX::BinCompiler::merge(inputs, argv[2]));
+            return 0;
+        }
+        if (command == "--bin-view" && argc >= 3 && argc <= 4)
+        {
+            const auto count = argc == 4 ? parseUnsigned(argv[3]) : std::optional<std::uint64_t>(256);
+            if (!count || *count == 0 || *count > 4096) throw std::runtime_error("Invalid byte count.");
+            previewBin(argv[2], static_cast<std::size_t>(*count));
+            return 0;
+        }
         if (command == "--iso" && argc >= 4 && argc <= 5)
         {
             const auto result = DecompileX::ISOCompiler::compile(argv[2], argv[3], argc == 5 ? argv[4] : "DECOMPILEX");
