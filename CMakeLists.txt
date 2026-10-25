@@ -1,10 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(DecompileX
-    VERSION 0.2.0
-    DESCRIPTION "Advanced Game Binary Analysis Toolkit"
-    LANGUAGES CXX
-)
+project(DecompileX VERSION 0.3.0 DESCRIPTION "Binary analysis and archive toolkit" LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,13 +11,8 @@ option(DECOMPILEX_BUILD_APK_LIB "Build Android JNI library" OFF)
 option(DECOMPILEX_BUILD_SETUP "Build setup utility" ON)
 option(DECOMPILEX_ENABLE_WARNINGS "Enable compiler warnings" ON)
 
-set(DECOMPILEX_SOURCE_DIR
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
-)
-
-set(DECOMPILEX_BACKEND_DIR
-    "${DECOMPILEX_SOURCE_DIR}/backend"
-)
+set(DECOMPILEX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
+set(DECOMPILEX_BACKEND_DIR "${DECOMPILEX_SOURCE_DIR}/backend")
 
 set(DECOMPILEX_BACKEND_SOURCES
     "${DECOMPILEX_BACKEND_DIR}/ZipGenerator.cpp"
@@ -35,48 +26,33 @@ set(DECOMPILEX_BACKEND_HEADERS
     "${DECOMPILEX_BACKEND_DIR}/ISOCompiler.hpp"
 )
 
-set(DECOMPILEX_NATIVE_BRIDGE
-    "${DECOMPILEX_SOURCE_DIR}/android/NativeBridge.cpp"
-)
-
-foreach(SOURCE_FILE IN LISTS DECOMPILEX_BACKEND_SOURCES)
-    if(NOT EXISTS "${SOURCE_FILE}")
-        message(FATAL_ERROR
-            "Missing backend source: ${SOURCE_FILE}"
-        )
+foreach(SOURCE IN LISTS DECOMPILEX_BACKEND_SOURCES)
+    if(NOT EXISTS "${SOURCE}")
+        message(FATAL_ERROR "Missing backend source: ${SOURCE}")
     endif()
 endforeach()
 
 if(ANDROID AND DECOMPILEX_BUILD_APK_LIB)
     add_library(DecompileX SHARED
-        "${DECOMPILEX_NATIVE_BRIDGE}"
+        "${DECOMPILEX_SOURCE_DIR}/android/NativeBridge.cpp"
         ${DECOMPILEX_BACKEND_SOURCES}
         ${DECOMPILEX_BACKEND_HEADERS}
     )
-
     target_link_libraries(DecompileX PRIVATE log)
 else()
-    set(DECOMPILEX_PLATFORM_SOURCES)
-
+    set(DECOMPILEX_RESOURCES)
     if(WIN32)
         enable_language(RC)
-
-        set(DECOMPILEX_ICON_RC
-            "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/DecompileX.rc"
-        )
-
-        if(EXISTS "${DECOMPILEX_ICON_RC}")
-            list(APPEND DECOMPILEX_PLATFORM_SOURCES
-                "${DECOMPILEX_ICON_RC}"
-            )
+        set(DECOMPILEX_RC "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/DecompileX.rc")
+        if(EXISTS "${DECOMPILEX_RC}")
+            list(APPEND DECOMPILEX_RESOURCES "${DECOMPILEX_RC}")
         endif()
     endif()
-
     add_executable(DecompileX
         "${DECOMPILEX_SOURCE_DIR}/Main.cpp"
         ${DECOMPILEX_BACKEND_SOURCES}
         ${DECOMPILEX_BACKEND_HEADERS}
-        ${DECOMPILEX_PLATFORM_SOURCES}
+        ${DECOMPILEX_RESOURCES}
     )
 endif()
 
@@ -91,42 +67,15 @@ target_compile_definitions(DecompileX PRIVATE
     DECOMPILEX_NAME="${PROJECT_NAME}"
 )
 
-if(ANDROID)
-    target_compile_definitions(DecompileX PRIVATE
-        DECOMPILEX_ANDROID=1
-    )
-elseif(WIN32)
-    target_compile_definitions(DecompileX PRIVATE
-        DECOMPILEX_WINDOWS=1
-    )
-elseif(APPLE)
-    target_compile_definitions(DecompileX PRIVATE
-        DECOMPILEX_MACOS=1
-    )
-elseif(UNIX)
-    target_compile_definitions(DecompileX PRIVATE
-        DECOMPILEX_LINUX=1
-    )
-endif()
-
 if(DECOMPILEX_ENABLE_WARNINGS)
     if(MSVC)
-        target_compile_options(DecompileX PRIVATE
-            /W4
-            /EHsc
-            /utf-8
-        )
+        target_compile_options(DecompileX PRIVATE /W4 /EHsc /utf-8)
     else()
-        target_compile_options(DecompileX PRIVATE
-            -Wall
-            -Wextra
-            -Wpedantic
-        )
+        target_compile_options(DecompileX PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
 
 set_target_properties(DecompileX PROPERTIES
-    OUTPUT_NAME "DecompileX"
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
@@ -134,34 +83,23 @@ set_target_properties(DecompileX PROPERTIES
 
 foreach(CONFIG Debug Release RelWithDebInfo MinSizeRel)
     string(TOUPPER "${CONFIG}" CONFIG_UPPER)
-
     set_target_properties(DecompileX PROPERTIES
-        "RUNTIME_OUTPUT_DIRECTORY_${CONFIG_UPPER}"
-        "${CMAKE_BINARY_DIR}/bin"
-        "LIBRARY_OUTPUT_DIRECTORY_${CONFIG_UPPER}"
-        "${CMAKE_BINARY_DIR}/lib"
-        "ARCHIVE_OUTPUT_DIRECTORY_${CONFIG_UPPER}"
-        "${CMAKE_BINARY_DIR}/lib"
+        "RUNTIME_OUTPUT_DIRECTORY_${CONFIG_UPPER}" "${CMAKE_BINARY_DIR}/bin"
+        "LIBRARY_OUTPUT_DIRECTORY_${CONFIG_UPPER}" "${CMAKE_BINARY_DIR}/lib"
+        "ARCHIVE_OUTPUT_DIRECTORY_${CONFIG_UPPER}" "${CMAKE_BINARY_DIR}/lib"
     )
 endforeach()
 
 if(DECOMPILEX_BUILD_SETUP AND NOT ANDROID)
-    add_executable(DecompileX-Setup
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools/Setup.cpp"
-    )
-
-    target_compile_features(DecompileX-Setup PRIVATE cxx_std_17)
-
-    set_target_properties(DecompileX-Setup PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-    )
-
-    install(TARGETS DecompileX-Setup
-        RUNTIME DESTINATION bin
-    )
+    set(DECOMPILEX_SETUP_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/tools/Setup.cpp")
+    if(EXISTS "${DECOMPILEX_SETUP_SOURCE}")
+        add_executable(DecompileX-Setup "${DECOMPILEX_SETUP_SOURCE}")
+        target_compile_features(DecompileX-Setup PRIVATE cxx_std_17)
+        set_target_properties(DecompileX-Setup PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+        )
+        install(TARGETS DecompileX-Setup RUNTIME DESTINATION bin)
+    endif()
 endif()
 
-install(TARGETS DecompileX
-    RUNTIME DESTINATION bin
-    LIBRARY DESTINATION lib
-)
+install(TARGETS DecompileX RUNTIME DESTINATION bin LIBRARY DESTINATION lib)
