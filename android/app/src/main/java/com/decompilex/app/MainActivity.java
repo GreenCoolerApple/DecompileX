@@ -4,6 +4,10 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Color;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
@@ -29,7 +33,9 @@ public class MainActivity extends Activity {
     private static final int OPEN_FILE = 100;
     private static final int OPEN_COMPARE = 101;
     private static final int SAVE_BIN = 102;
+    private static final int SAVE_REPORT = 103;
     private static final int MAX_BYTES = 16 * 1024 * 1024;
+    private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final int bg = Color.rgb(10, 15, 22);
     private final int panel = Color.rgb(24, 33, 45);
     private final int accent = Color.rgb(55, 216, 149);
@@ -48,6 +54,7 @@ public class MainActivity extends Activity {
     private native String entropy(byte[] data);
     private native String compareBytes(byte[] first, byte[] second);
     private native byte[] hexToBytes(String hex);
+    private native String findHex(byte[] data, String pattern);
 
     @Override
     public void onCreate(Bundle state) {
@@ -109,17 +116,29 @@ public class MainActivity extends Activity {
         GridLayout grid = new GridLayout(this);
         grid.setColumnCount(2);
         root.addView(grid);
-        tile(grid, "FILE INFO", () -> showResult("FILE INFORMATION", analyzeBytes(loaded)));
-        tile(grid, "HEX VIEWER", () -> askNumber("Hex offset (decimal)", "0", offset -> showResult("HEX VIEWER", hexDump(loaded, offset, 512))));
-        tile(grid, "ASCII STRINGS", () -> showResult("ASCII STRINGS", extractStrings(loaded, 5)));
-        tile(grid, "ENTROPY", () -> showResult("ENTROPY", entropy(loaded)));
-        tile(grid, "CRC32", () -> showResult("CRC32 / FILE INFO", analyzeBytes(loaded)));
+        tile(grid, "FILE INFO", () -> { byte[] data = loaded; analyzeAsync("FILE INFORMATION", () -> analyzeBytes(data)); });
+        tile(grid, "HEX VIEWER", () -> askNumber("Hex offset (decimal)", "0", offset -> { byte[] data = loaded; analyzeAsync("HEX VIEWER", () -> hexDump(data, offset, 512)); }));
+        tile(grid, "ASCII STRINGS", () -> { byte[] data = loaded; analyzeAsync("ASCII STRINGS", () -> extractStrings(data, 5)); });
+        tile(grid, "ENTROPY", () -> { byte[] data = loaded; analyzeAsync("ENTROPY", () -> entropy(data)); });
+        tile(grid, "CRC32", () -> { byte[] data = loaded; analyzeAsync("CRC32 / FILE INFO", () -> analyzeBytes(data)); });
         tile(grid, "COMPARE", () -> openDocument(OPEN_COMPARE));
+        tile(grid, "FIND HEX", () -> askHexSearch());
 
         section(root, "BINARY BUILDER");
         Button bin = button("CREATE .BIN FROM HEX", false);
         root.addView(bin);
         bin.setOnClickListener(v -> createBinary());
+
+        section(root, "REPORT TOOLS");
+        Button saveReport = button("EXPORT REPORT AS .TXT", false);
+        root.addView(saveReport);
+        saveReport.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("text/plain");
+            intent.putExtra(Intent.EXTRA_TITLE, "DecompileX-report.txt");
+            startActivityForResult(intent, SAVE_REPORT);
+        });
 
         section(root, "ANALYSIS OUTPUT");
         output = text(currentReport, 13, Color.rgb(221, 231, 240), false);
@@ -175,6 +194,41 @@ public class MainActivity extends Activity {
         output.setText(currentReport);
     }
 
+    private void analyzeAsync(String title, java.util.concurrent.Callable<String> operation) {
+        currentReport = title + "\n\nAnalyzing...";
+        output.setText(currentReport);
+        worker.execute(() -> {
+            try {
+                String report = operation.call();
+                runOnUiThread(() -> showResult(title, report));
+            } catch (Exception e) {
+                runOnUiThread(() -> showMessage("Analysis failed: " + e.getMessage()));
+            }
+        });
+    }
+
+    private void askHexSearch() {
+        EditText field = new EditText(this);
+        field.setHint("Example: 4D 5A");
+        new AlertDialog.Builder(this).setTitle("Find hexadecimal bytes")
+            .setView(field).setNegativeButton("Cancel", null)
+            .setPositiveButton("Search", (dialog, which) -> {
+                String pattern = field.getText().toString();
+                byte[] snapshot = loaded;
+                analyzeAsync("HEX SEARCH", () -> findHex(snapshot, pattern));
+            }).show();
+    }
+
+    private String documentName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) return cursor.getString(index);
+            }
+        } catch (Exception ignored) { }
+        return "Selected binary";
+    }
+
     private void showMessage(String message) {
         new AlertDialog.Builder(this).setMessage(message).setPositiveButton("OK", null).show();
     }
@@ -210,6 +264,12 @@ public class MainActivity extends Activity {
             }).show();
     }
 
+    @Override
+    protected void onDestroy() {
+        worker.shutdownNow();
+        super.onDestroy();
+    }
+
     private void openDocument(int request) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -236,6 +296,15 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         try {
+            if (requestCode == SAVE_REPORT) {
+                byte[] report = currentReport.getBytes(StandardCharsets.UTF_8);
+                try (OutputStream stream = getContentResolver().openOutputStream(data.getData(), "wt")) {
+                    if (stream == null) throw new Exception("Unable to export report.");
+                    stream.write(report);
+                }
+                showMessage("Report exported successfully.");
+                return;
+            }
             if (requestCode == SAVE_BIN) {
                 if (pendingSave == null) return;
                 try (OutputStream stream = getContentResolver().openOutputStream(data.getData(), "w")) {
@@ -247,15 +316,29 @@ public class MainActivity extends Activity {
                 pendingSave = null;
                 return;
             }
-            byte[] content = readDocument(data.getData());
-            if (requestCode == OPEN_FILE) {
-                loaded = content;
-                filename = data.getData().getLastPathSegment();
-                fileLabel.setText(filename);
-                showResult("FILE INFORMATION", analyzeBytes(loaded));
-            } else if (requestCode == OPEN_COMPARE && loaded != null) {
-                showResult("BINARY COMPARISON", compareBytes(loaded, content));
-            }
+            Uri uri = data.getData();
+            worker.execute(() -> {
+                try {
+                    byte[] content = readDocument(uri);
+                    if (requestCode == OPEN_FILE) {
+                        String name = documentName(uri);
+                        String report = analyzeBytes(content);
+                        runOnUiThread(() -> {
+                            loaded = content;
+                            filename = name;
+                            fileLabel.setText(filename);
+                            showResult("FILE INFORMATION", report);
+                        });
+                    } else if (requestCode == OPEN_COMPARE) {
+                        byte[] first = loaded;
+                        if (first == null) return;
+                        String report = compareBytes(first, content);
+                        runOnUiThread(() -> showResult("BINARY COMPARISON", report));
+                    }
+                } catch (Exception e) {
+                    runOnUiThread(() -> showMessage("Operation failed: " + e.getMessage()));
+                }
+            });
         } catch (Exception e) {
             showMessage("Operation failed: " + e.getMessage());
         }
