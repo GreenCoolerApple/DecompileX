@@ -10,23 +10,36 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+option(DECOMPILEX_BUILD_APK_LIB "Build Android JNI library" OFF)
+
 file(GLOB_RECURSE DECOMPILEX_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
 
-option(DECOMPILEX_BUILD_APK_LIB "Build Android JNI library" OFF)
+set(DECOMPILEX_NATIVE_BRIDGE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/android/NativeBridge.cpp"
+)
 
 if(ANDROID AND DECOMPILEX_BUILD_APK_LIB)
     add_library(DecompileX SHARED
-        src/android/NativeBridge.cpp
+        ${DECOMPILEX_NATIVE_BRIDGE}
     )
 
     target_link_libraries(DecompileX PRIVATE log)
-
 else()
     list(REMOVE_ITEM DECOMPILEX_SOURCES
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/android/NativeBridge.cpp"
+        "${DECOMPILEX_NATIVE_BRIDGE}"
     )
+
+    if(WIN32)
+        enable_language(RC)
+
+        list(APPEND DECOMPILEX_SOURCES
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/DecompileX.rc"
+        )
+    endif()
 
     add_executable(DecompileX
         ${DECOMPILEX_SOURCES}
@@ -41,6 +54,24 @@ target_include_directories(DecompileX PRIVATE
 target_compile_definitions(DecompileX PRIVATE
     DECOMPILEX_VERSION="${PROJECT_VERSION}"
 )
+
+if(ANDROID)
+    target_compile_definitions(DecompileX PRIVATE
+        DECOMPILEX_ANDROID=1
+    )
+elseif(WIN32)
+    target_compile_definitions(DecompileX PRIVATE
+        DECOMPILEX_WINDOWS=1
+    )
+elseif(APPLE)
+    target_compile_definitions(DecompileX PRIVATE
+        DECOMPILEX_MACOS=1
+    )
+elseif(UNIX)
+    target_compile_definitions(DecompileX PRIVATE
+        DECOMPILEX_LINUX=1
+    )
+endif()
 
 if(MSVC)
     target_compile_options(DecompileX PRIVATE
