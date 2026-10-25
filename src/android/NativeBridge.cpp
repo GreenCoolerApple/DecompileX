@@ -1,103 +1,179 @@
 #include <jni.h>
-#include <string>
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
+#include <iomanip>
+#include <sstream>
+#include <string>
 #include <vector>
 
-namespace
-{
-    std::string detectFormat(const std::vector<unsigned char>& data)
-    {
-        if (data.size() >= 4)
-        {
-            if (data[0] == 0x7F &&
-                data[1] == 'E' &&
-                data[2] == 'L' &&
-                data[3] == 'F')
-                return "ELF Binary";
+namespace {
+std::vector<std::uint8_t> bytes(JNIEnv* env, jbyteArray input) {
+    if (!input) return {};
+    jsize size = env->GetArrayLength(input);
+    std::vector<std::uint8_t> out(static_cast<std::size_t>(size));
+    if (size) env->GetByteArrayRegion(input, 0, size, reinterpret_cast<jbyte*>(out.data()));
+    return out;
+}
 
-            if (data[0] == 'P' &&
-                data[1] == 'K' &&
-                data[2] == 0x03 &&
-                data[3] == 0x04)
-                return "ZIP / APK / JAR";
+jstring result(JNIEnv* env, const std::string& s) {
+    return env->NewStringUTF(s.c_str());
+}
 
-            if (data[0] == 0xFE &&
-                data[1] == 0xED &&
-                data[2] == 0xFA &&
-                (data[3] == 0xCE || data[3] == 0xCF))
-                return "Mach-O Binary";
+std::string hex(std::uint64_t value, int width = 0) {
+    std::ostringstream s;
+    s << std::uppercase << std::hex << std::setfill('0') << std::setw(width) << value;
+    return s.str();
+}
 
-            if (data[0] == 0xCA &&
-                data[1] == 0xFE &&
-                data[2] == 0xBA &&
-                data[3] == 0xBE)
-                return "Java Class / Universal Mach-O";
-        }
+std::string kind(const std::vector<std::uint8_t>& b) {
+    if (b.size() >= 2 && b[0] == 'M' && b[1] == 'Z') return "PE / DOS executable";
+    if (b.size() >= 4 && b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F') return "ELF executable";
+    if (b.size() >= 4 && b[0] == 'P' && b[1] == 'K' && b[2] == 3 && b[3] == 4) return "ZIP archive";
+    if (b.size() >= 4 && ((b[0] == 0xFE && b[1] == 0xED && b[2] == 0xFA && (b[3] == 0xCE || b[3] == 0xCF)) || (b[0] == 0xCF && b[1] == 0xFA && b[2] == 0xED && b[3] == 0xFE) || (b[0] == 0xCE && b[1] == 0xFA && b[2] == 0xED && b[3] == 0xFE))) return "Mach-O executable";
+    if (b.size() >= 8 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return "PNG image";
+    return "Unknown / raw binary";
+}
 
-        if (data.size() >= 64 &&
-            data[0] == 'M' &&
-            data[1] == 'Z')
-        {
-            std::uint32_t offset =
-                static_cast<std::uint32_t>(data[0x3C]) |
-                (static_cast<std::uint32_t>(data[0x3D]) << 8) |
-                (static_cast<std::uint32_t>(data[0x3E]) << 16) |
-                (static_cast<std::uint32_t>(data[0x3F]) << 24);
-
-            if (offset <= data.size() &&
-                data.size() - offset >= 4 &&
-                data[offset] == 'P' &&
-                data[offset + 1] == 'E' &&
-                data[offset + 2] == 0 &&
-                data[offset + 3] == 0)
-                return "Windows PE Binary";
-
-            return "DOS MZ Binary";
-        }
-
-        return "Unknown Binary";
+std::uint32_t crc32(const std::vector<std::uint8_t>& b) {
+    std::uint32_t crc = 0xffffffffu;
+    for (auto x : b) {
+        crc ^= x;
+        for (int i = 0; i < 8; ++i) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
     }
+    return ~crc;
+}
+
+int nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_decompilex_app_MainActivity_getNativeVersion(
-    JNIEnv* env,
-    jobject
-)
-{
-    return env->NewStringUTF("DecompileX 0.1.0 - C++17");
+Java_com_decompilex_app_MainActivity_getNativeVersion(JNIEnv* env, jobject) {
+    return result(env, "0.4.0");
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_com_decompilex_app_MainActivity_analyzeBytes(
-    JNIEnv* env,
-    jobject,
-    jbyteArray bytes
-)
-{
-    if (bytes == nullptr)
-        return env->NewStringUTF("No data received");
-
-    jsize length = env->GetArrayLength(bytes);
-
-    std::vector<unsigned char> data(
-        static_cast<std::size_t>(length)
-    );
-
-    if (length > 0)
-    {
-        env->GetByteArrayRegion(
-            bytes,
-            0,
-            length,
-            reinterpret_cast<jbyte*>(data.data())
-        );
-
-        if (env->ExceptionCheck())
-            return nullptr;
+Java_com_decompilex_app_MainActivity_analyzeBytes(JNIEnv* env, jobject, jbyteArray input) {
+    auto b = bytes(env, input);
+    std::ostringstream s;
+    s << "FORMAT  " << kind(b) << "\n"
+      << "LOADED  " << b.size() << " bytes\n"
+      << "CRC32   " << hex(crc32(b), 8) << "\n";
+    if (b.size() >= 5 && b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F') {
+        s << "ELF     " << (b[4] == 2 ? "64-bit" : b[4] == 1 ? "32-bit" : "unknown class") << "\n";
     }
+    return result(env, s.str());
+}
 
-    std::string result = detectFormat(data);
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_decompilex_app_MainActivity_hexDump(JNIEnv* env, jobject, jbyteArray input, jint offset, jint length) {
+    auto b = bytes(env, input);
+    std::size_t start = std::min(b.size(), static_cast<std::size_t>(std::max(0, offset)));
+    std::size_t end = start + std::min(b.size() - start, static_cast<std::size_t>(std::max(0, std::min(length, 4096))));
+    std::ostringstream s;
+    for (std::size_t i = start; i < end; i += 16) {
+        s << hex(i, 8) << "  ";
+        for (std::size_t j = 0; j < 16; ++j) {
+            if (i + j < end) s << hex(b[i + j], 2) << ' ';
+            else s << "   ";
+        }
+        s << " |";
+        for (std::size_t j = i; j < std::min(i + 16, end); ++j) s << (b[j] >= 32 && b[j] < 127 ? static_cast<char>(b[j]) : '.');
+        s << "|\n";
+    }
+    return result(env, s.str());
+}
 
-    return env->NewStringUTF(result.c_str());
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_decompilex_app_MainActivity_extractStrings(JNIEnv* env, jobject, jbyteArray input, jint minimum) {
+    auto b = bytes(env, input);
+    std::size_t min = static_cast<std::size_t>(std::max(3, std::min(minimum, 64)));
+    std::ostringstream s;
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < b.size() && count < 150; ) {
+        if (b[i] < 32 || b[i] > 126) { ++i; continue; }
+        std::size_t start = i;
+        while (i < b.size() && b[i] >= 32 && b[i] <= 126) ++i;
+        if (i - start >= min) {
+            s << "0x" << hex(start, 8) << "  ";
+            for (std::size_t j = start; j < std::min(i, start + 160); ++j) s << static_cast<char>(b[j]);
+            if (i - start > 160) s << "...";
+            s << '\n';
+            ++count;
+        }
+    }
+    if (!count) s << "No matching ASCII strings found.";
+    if (count == 150) s << "\nLimited to 150 strings.";
+    return result(env, s.str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_decompilex_app_MainActivity_entropy(JNIEnv* env, jobject, jbyteArray input) {
+    auto b = bytes(env, input);
+    if (b.empty()) return result(env, "No data loaded.");
+    std::array<std::uint64_t, 256> freq{};
+    for (auto x : b) ++freq[x];
+    double entropy = 0;
+    for (auto count : freq) {
+        if (count) {
+            double p = static_cast<double>(count) / static_cast<double>(b.size());
+            entropy -= p * std::log2(p);
+        }
+    }
+    std::ostringstream s;
+    s << std::fixed << std::setprecision(5) << "Shannon entropy: " << entropy << " / 8 bits per byte\n"
+      << "Sample size: " << b.size() << " bytes\n\nHigh entropy can indicate compressed or encrypted data, but is not conclusive.";
+    return result(env, s.str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_decompilex_app_MainActivity_compareBytes(JNIEnv* env, jobject, jbyteArray first, jbyteArray second) {
+    auto a = bytes(env, first), b = bytes(env, second);
+    std::size_t common = std::min(a.size(), b.size());
+    std::uint64_t differences = static_cast<std::uint64_t>(std::max(a.size(), b.size()) - common);
+    std::ostringstream s;
+    s << "FIRST   " << a.size() << " bytes\nSECOND  " << b.size() << " bytes\n";
+    std::size_t shown = 0;
+    for (std::size_t i = 0; i < common; ++i) {
+        if (a[i] != b[i]) {
+            ++differences;
+            if (shown++ < 20) s << "0x" << hex(i, 8) << ": " << hex(a[i], 2) << " -> " << hex(b[i], 2) << '\n';
+        }
+    }
+    s << "\nDifferent byte positions: " << differences;
+    return result(env, s.str());
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_decompilex_app_MainActivity_hexToBytes(JNIEnv* env, jobject, jstring input) {
+    if (!input) return nullptr;
+    const char* raw = env->GetStringUTFChars(input, nullptr);
+    if (!raw) return nullptr;
+    std::string value(raw);
+    env->ReleaseStringUTFChars(input, raw);
+    std::vector<jbyte> out;
+    int high = -1;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        char c = value[i];
+        if (c == ' ' || c == '\n' || c == '\t' || c == ',' || c == ':' || c == '_') {
+            if (high != -1) return nullptr;
+            continue;
+        }
+        if (high == -1 && c == '0' && i + 1 < value.size() && (value[i + 1] == 'x' || value[i + 1] == 'X')) { ++i; continue; }
+        int n = nibble(c);
+        if (n < 0) return nullptr;
+        if (high == -1) high = n;
+        else { out.push_back(static_cast<jbyte>((high << 4) | n)); high = -1; }
+        if (out.size() > 1024 * 1024) return nullptr;
+    }
+    if (high != -1) return nullptr;
+    jbyteArray array = env->NewByteArray(static_cast<jsize>(out.size()));
+    if (array && !out.empty()) env->SetByteArrayRegion(array, 0, static_cast<jsize>(out.size()), out.data());
+    return array;
 }
