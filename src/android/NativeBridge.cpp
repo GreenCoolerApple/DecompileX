@@ -1,3 +1,6 @@
+#include "backend/ISOCompiler.hpp"
+#include <filesystem>
+#include <exception>
 #include <jni.h>
 #include <algorithm>
 #include <array>
@@ -223,4 +226,37 @@ Java_com_decompilex_app_MainActivity_findHex(JNIEnv* env, jobject, jbyteArray in
     output << "\nTotal matches: " << total;
     if (total > 100) output << " (first 100 shown)";
     return result(env, output.str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_decompilex_app_MainActivity_compileIsoNative(JNIEnv* env, jobject,
+    jstring source, jstring destination, jstring label) {
+    if (!source || !destination || !label) return env->NewStringUTF("Missing ISO arguments.");
+    const char* s = env->GetStringUTFChars(source, nullptr);
+    if (!s) return nullptr;
+    const char* d = env->GetStringUTFChars(destination, nullptr);
+    if (!d) { env->ReleaseStringUTFChars(source, s); return nullptr; }
+    const char* l = env->GetStringUTFChars(label, nullptr);
+    if (!l) { env->ReleaseStringUTFChars(destination, d); env->ReleaseStringUTFChars(source, s); return nullptr; }
+    std::string src(s), dst(d), volume(l);
+    env->ReleaseStringUTFChars(label, l);
+    env->ReleaseStringUTFChars(destination, d);
+    env->ReleaseStringUTFChars(source, s);
+    try {
+        DecompileX::ISOOptions options;
+        options.volumeLabel = volume;
+        options.overwrite = false;
+        options.verifyOutput = true;
+        auto r = DecompileX::ISOCompiler::compile(src, dst, options);
+        std::string response = r.success
+            ? "OK|ISO generated: " + std::to_string(r.bytesWritten) + " bytes, " +
+              std::to_string(r.filesAdded) + " files, " + std::to_string(r.directoriesAdded) + " directories."
+            : "ISO failed: " + r.message;
+        return env->NewStringUTF(response.c_str());
+    } catch (const std::exception& e) {
+        std::string response = std::string("ISO exception: ") + e.what();
+        return env->NewStringUTF(response.c_str());
+    } catch (...) {
+        return env->NewStringUTF("Unknown native ISO error.");
+    }
 }
