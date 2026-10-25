@@ -146,6 +146,17 @@ public final class IsoReader implements Closeable {
         }
     }
 
+    public List<Entry> getEntries() {
+        return new ArrayList<>(entries);
+    }
+
+    public byte[] readEntry(Entry entry, int maxBytes) throws IOException {
+        if (entry.directory) throw new IOException("Cannot analyze a directory.");
+        if (entry.size > maxBytes) throw new IOException("Executable exceeds " + maxBytes + " byte analysis limit.");
+        if (entry.size > Integer.MAX_VALUE) throw new IOException("Executable too large for memory.");
+        return readAt(entry.extent * SECTOR, (int)entry.size);
+    }
+
     public String report() {
         StringBuilder result = new StringBuilder("ISO 9660 IMAGE\nVolume: ").append(volume)
             .append("\nImage bytes: ").append(imageSize)
