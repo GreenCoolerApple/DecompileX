@@ -49,13 +49,16 @@ jobs:
           }
 
           Write-Host "Windows build successful!"
-          Get-Item "build/bin/DecompileX.exe"
 
       - name: Package Windows
         run: |
           New-Item -ItemType Directory -Force -Path dist
           Copy-Item "build/bin/DecompileX.exe" "dist/DecompileX.exe"
-          Compress-Archive -Path "dist/DecompileX.exe" -DestinationPath "DecompileX-Windows-x64.zip" -Force
+
+          Compress-Archive `
+            -Path "dist/DecompileX.exe" `
+            -DestinationPath "DecompileX-Windows-x64.zip" `
+            -Force
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
@@ -66,91 +69,13 @@ jobs:
           if-no-files-found: error
 
   android:
-    name: Android ARM64
-    runs-on: ubuntu-latest
-
-    env:
-      NDK_VERSION: 27.2.12479018
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Setup Android NDK
-        run: |
-          set -e
-
-          echo "Android SDK: $ANDROID_HOME"
-
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
-          fi
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "Android SDK Manager not found!"
-            exit 1
-          fi
-
-          yes | "$SDKMANAGER" --licenses > /dev/null || true
-
-          "$SDKMANAGER" --install "ndk;$NDK_VERSION"
-
-          NDK_PATH="$ANDROID_HOME/ndk/$NDK_VERSION"
-
-          if [ ! -f "$NDK_PATH/build/cmake/android.toolchain.cmake" ]; then
-            echo "Android NDK installation failed!"
-            exit 1
-          fi
-
-          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
-
-      - name: Setup Ninja
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build
-
-      - name: Configure CMake
-        run: |
-          cmake -S . -B build-android \
-            -G Ninja \
-            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-24 \
-            -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build DecompileX
-        run: |
-          cmake --build build-android --parallel
-
-      - name: Verify Executable
-        run: |
-          test -f build-android/bin/DecompileX
-          file build-android/bin/DecompileX
-
-      - name: Package Android ARM64
-        run: |
-          mkdir -p dist
-          cp build-android/bin/DecompileX dist/DecompileX
-          chmod +x dist/DecompileX
-          cd dist
-          zip -9 ../DecompileX-Android-ARM64.zip DecompileX
-
-      - name: Upload Android ARM64 Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: DecompileX-Android-ARM64
-          path: DecompileX-Android-ARM64.zip
-          retention-days: 30
-          if-no-files-found: error
-
-  apk:
     name: Android APK
     runs-on: ubuntu-latest
 
     env:
       NDK_VERSION: 27.2.12479018
+      BUILD_TOOLS_VERSION: 35.0.0
+      APK_PATH: android/app/build/outputs/apk/debug/app-debug.apk
 
     steps:
       - name: Checkout Repository
@@ -167,11 +92,9 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Setup Android Dependencies
+      - name: Setup Android SDK
         run: |
-          set -e
-
-          echo "Android SDK: $ANDROID_HOME"
+          set -euo pipefail
 
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
@@ -184,8 +107,6 @@ jobs:
             exit 1
           fi
 
-          yes | "$SDKMANAGER" --licenses > /dev/null || true
-
           "$SDKMANAGER" --install \
             "platforms;android-35" \
             "build-tools;35.0.0" \
@@ -194,40 +115,93 @@ jobs:
 
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
-      - name: Verify Android Dependencies
+      - name: Verify Android SDK
         run: |
+          set -euo pipefail
+
           test -d "$ANDROID_HOME/platforms/android-35"
-          test -d "$ANDROID_HOME/build-tools/35.0.0"
+          test -d "$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION"
           test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+
+          echo "Android SDK verified!"
 
       - name: Build Android APK
         working-directory: android
         run: |
           gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Verify APK
+      - name: Verify APK File
         run: |
-          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          set -euo pipefail
 
-          if [ ! -f "$APK" ]; then
-            echo "APK was not generated!"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "APK not found!"
             exit 1
           fi
 
-          echo "Android APK generated successfully!"
-          ls -lh "$APK"
+          echo "APK generated successfully!"
+          ls -lh "$APK_PATH"
+
+      - name: Verify APK Signature
+        run: |
+          set -euo pipefail
+
+          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner"
+
+          "$APKSIGNER" verify \
+            --verbose \
+            --print-certs \
+            "$APK_PATH"
+
+          echo "APK signature verified!"
+
+      - name: Verify APK Package
+        run: |
+          set -euo pipefail
+
+          AAPT="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt"
+
+          "$AAPT" dump badging "$APK_PATH" | tee apk-info.txt
+
+          grep -q "package: name='com.decompilex.app'" apk-info.txt
+
+          echo "APK package verified!"
+
+      - name: Verify Native Library
+        run: |
+          set -euo pipefail
+
+          unzip -l "$APK_PATH" | tee apk-files.txt
+
+          grep -q "lib/arm64-v8a/libDecompileX.so" apk-files.txt
+
+          echo "Native C++ library verified!"
+
+      - name: Verify APK Alignment
+        run: |
+          set -euo pipefail
+
+          ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/zipalign"
+
+          "$ZIPALIGN" -c -P 16 -v 4 "$APK_PATH"
+
+          echo "APK alignment verified!"
 
       - name: Package Android APK
         run: |
           mkdir -p dist
 
-          cp android/app/build/outputs/apk/debug/app-debug.apk \
-            dist/DecompileX-Android.apk
+          cp "$APK_PATH" dist/DecompileX-Android.apk
 
-      - name: Upload Android APK Artifact
+          sha256sum dist/DecompileX-Android.apk \
+            > dist/SHA256SUMS.txt
+
+      - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
           name: DecompileX-Android-APK
-          path: dist/DecompileX-Android.apk
+          path: |
+            dist/DecompileX-Android.apk
+            dist/SHA256SUMS.txt
           retention-days: 30
           if-no-files-found: error
