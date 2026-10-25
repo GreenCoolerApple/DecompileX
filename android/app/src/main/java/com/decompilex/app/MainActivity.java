@@ -41,6 +41,9 @@ public class MainActivity extends Activity {
     private static final int SAVE_REPORT = 103;
     private static final int PICK_ISO_TREE = 104;
     private static final int SAVE_ISO = 105;
+    private static final int OPEN_ISO = 106;
+    private static final int EXTRACT_ISO = 107;
+    private Uri selectedIso;
     private static final long MAX_ISO_INPUT = 512L * 1024 * 1024;
     private static final int MAX_ISO_ENTRIES = 2000;
     private Uri isoTree;
@@ -147,6 +150,19 @@ public class MainActivity extends Activity {
             Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivityForResult(intent, PICK_ISO_TREE);
+        });
+
+        section(root, "ISO 9660 READER");
+        Button openIso = button("OPEN ISO FILE / INSPECT", false);
+        root.addView(openIso);
+        openIso.setOnClickListener(v -> openDocument(OPEN_ISO));
+        Button extractIso = button("EXTRACT OPENED ISO", false);
+        root.addView(extractIso);
+        extractIso.setOnClickListener(v -> {
+            if (selectedIso == null) { showMessage("Open an ISO file first."); return; }
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+            startActivityForResult(intent, EXTRACT_ISO);
         });
 
         section(root, "REPORT TOOLS");
@@ -379,6 +395,68 @@ public class MainActivity extends Activity {
         });
     }
 
+    private File stageSelectedIso(Uri uri) throws Exception {
+        File staged = File.createTempFile("decompilex-open-", ".iso", getCacheDir());
+        try {
+            try (InputStream source = getContentResolver().openInputStream(uri);
+                 FileOutputStream target = new FileOutputStream(staged)) {
+                if (source == null) throw new Exception("Unable to open ISO file.");
+                byte[] buffer = new byte[65536];
+                long bytes = 0;
+                int count;
+                while ((count = source.read(buffer)) != -1) {
+                    if (Thread.currentThread().isInterrupted()) throw new Exception("Interrupted.");
+                    bytes += count;
+                    if (bytes > 1024L * 1024 * 1024) throw new Exception("ISO exceeds 1 GiB limit.");
+                    target.write(buffer, 0, count);
+                }
+            }
+            return staged;
+        } catch (Exception error) {
+            staged.delete();
+            throw error;
+        }
+    }
+
+    private void inspectIso(Uri uri) {
+        showResult("OPEN ISO", "Reading ISO 9660 directory structure...");
+        worker.execute(() -> {
+            File staged = null;
+            try {
+                staged = stageSelectedIso(uri);
+                String report = new IsoReader(staged).report();
+                selectedIso = uri;
+                runOnUiThread(() -> showResult("ISO CONTENTS", report));
+            } catch (Exception error) {
+                selectedIso = null;
+                String message = error.getMessage();
+                runOnUiThread(() -> showResult("ISO ERROR", message == null ? "Unknown error" : message));
+            } finally {
+                if (staged != null) staged.delete();
+            }
+        });
+    }
+
+    private void extractOpenedIso(Uri destination) {
+        Uri sourceUri = selectedIso;
+        if (sourceUri == null) return;
+        showResult("ISO EXTRACTION", "Extracting files... Please wait.");
+        worker.execute(() -> {
+            File staged = null;
+            try {
+                staged = stageSelectedIso(sourceUri);
+                int count = new IsoReader(staged).extract(getContentResolver(), destination);
+                String report = "Extracted " + count + " files to selected folder.";
+                runOnUiThread(() -> showResult("ISO EXTRACTED", report));
+            } catch (Exception error) {
+                String message = error.getMessage();
+                runOnUiThread(() -> showResult("ISO ERROR", message == null ? "Unknown error" : message));
+            } finally {
+                if (staged != null) staged.delete();
+            }
+        });
+    }
+
     @Override
     protected void onDestroy() {
         worker.shutdownNow();
@@ -411,6 +489,14 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         try {
+            if (requestCode == OPEN_ISO) {
+                inspectIso(data.getData());
+                return;
+            }
+            if (requestCode == EXTRACT_ISO) {
+                extractOpenedIso(data.getData());
+                return;
+            }
             if (requestCode == PICK_ISO_TREE) {
                 requestIsoDestination(data.getData());
                 return;
