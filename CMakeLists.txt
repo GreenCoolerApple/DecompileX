@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(DecompileX VERSION 0.3.0 DESCRIPTION "Binary analysis and archive toolkit" LANGUAGES CXX)
+project(DecompileX VERSION 0.4.0 DESCRIPTION "Binary analysis and archive toolkit" LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(DECOMPILEX_BUILD_APK_LIB "Build Android JNI library" OFF)
 option(DECOMPILEX_BUILD_SETUP "Build setup utility" ON)
 option(DECOMPILEX_ENABLE_WARNINGS "Enable compiler warnings" ON)
+include(CTest)
 
 set(DECOMPILEX_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set(DECOMPILEX_BACKEND_DIR "${DECOMPILEX_SOURCE_DIR}/backend")
@@ -18,12 +19,14 @@ set(DECOMPILEX_BACKEND_SOURCES
     "${DECOMPILEX_BACKEND_DIR}/ZipGenerator.cpp"
     "${DECOMPILEX_BACKEND_DIR}/ExeCompiler.cpp"
     "${DECOMPILEX_BACKEND_DIR}/ISOCompiler.cpp"
+    "${DECOMPILEX_BACKEND_DIR}/BinCompiler.cpp"
 )
 
 set(DECOMPILEX_BACKEND_HEADERS
     "${DECOMPILEX_BACKEND_DIR}/ZipGenerator.hpp"
     "${DECOMPILEX_BACKEND_DIR}/ExeCompiler.hpp"
     "${DECOMPILEX_BACKEND_DIR}/ISOCompiler.hpp"
+    "${DECOMPILEX_BACKEND_DIR}/BinCompiler.hpp"
 )
 
 foreach(SOURCE IN LISTS DECOMPILEX_BACKEND_SOURCES)
@@ -103,3 +106,9 @@ if(DECOMPILEX_BUILD_SETUP AND NOT ANDROID)
 endif()
 
 install(TARGETS DecompileX RUNTIME DESTINATION bin LIBRARY DESTINATION lib)
+
+if(BUILD_TESTING AND NOT (ANDROID AND DECOMPILEX_BUILD_APK_LIB))
+    add_test(NAME DecompileX_Help COMMAND $<TARGET_FILE:DecompileX> --help)
+    add_test(NAME DecompileX_BinHex COMMAND $<TARGET_FILE:DecompileX> --bin-hex "44 58" "${CMAKE_CURRENT_BINARY_DIR}/decompilex-smoke.bin")
+    set_tests_properties(DecompileX_BinHex PROPERTIES DEPENDS DecompileX_Help)
+endif()
