@@ -49,8 +49,9 @@ jobs:
           }
 
           Write-Host "Windows build successful!"
+          Get-Item "build/bin/DecompileX.exe"
 
-      - name: Package Build
+      - name: Package Windows
         run: |
           New-Item -ItemType Directory -Force -Path dist
           Copy-Item "build/bin/DecompileX.exe" "dist/DecompileX.exe"
@@ -128,7 +129,7 @@ jobs:
           test -f build-android/bin/DecompileX
           file build-android/bin/DecompileX
 
-      - name: Package Build
+      - name: Package Android ARM64
         run: |
           mkdir -p dist
           cp build-android/bin/DecompileX dist/DecompileX
@@ -136,10 +137,97 @@ jobs:
           cd dist
           zip -9 ../DecompileX-Android-ARM64.zip DecompileX
 
-      - name: Upload Android Artifact
+      - name: Upload Android ARM64 Artifact
         uses: actions/upload-artifact@v4
         with:
           name: DecompileX-Android-ARM64
           path: DecompileX-Android-ARM64.zip
+          retention-days: 30
+          if-no-files-found: error
+
+  apk:
+    name: Android APK
+    runs-on: ubuntu-latest
+
+    env:
+      NDK_VERSION: 27.2.12479018
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Setup Android Dependencies
+        run: |
+          set -e
+
+          echo "Android SDK: $ANDROID_HOME"
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Android SDK Manager not found!"
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+
+          "$SDKMANAGER" --install \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "cmake;3.22.1" \
+            "ndk;$NDK_VERSION"
+
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Verify Android Dependencies
+        run: |
+          test -d "$ANDROID_HOME/platforms/android-35"
+          test -d "$ANDROID_HOME/build-tools/35.0.0"
+          test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
+
+      - name: Build Android APK
+        working-directory: android
+        run: |
+          gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify APK
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "APK was not generated!"
+            exit 1
+          fi
+
+          echo "Android APK generated successfully!"
+          ls -lh "$APK"
+
+      - name: Package Android APK
+        run: |
+          mkdir -p dist
+
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+            dist/DecompileX-Android.apk
+
+      - name: Upload Android APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DecompileX-Android-APK
+          path: dist/DecompileX-Android.apk
           retention-days: 30
           if-no-files-found: error
