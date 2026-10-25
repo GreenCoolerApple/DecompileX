@@ -55,7 +55,7 @@ int nibble(char c) {
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_decompilex_app_MainActivity_getNativeVersion(JNIEnv* env, jobject) {
-    return result(env, "0.4.0");
+    return result(env, "0.0.1");
 }
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -176,4 +176,51 @@ Java_com_decompilex_app_MainActivity_hexToBytes(JNIEnv* env, jobject, jstring in
     jbyteArray array = env->NewByteArray(static_cast<jsize>(out.size()));
     if (array && !out.empty()) env->SetByteArrayRegion(array, 0, static_cast<jsize>(out.size()), out.data());
     return array;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_decompilex_app_MainActivity_findHex(JNIEnv* env, jobject, jbyteArray input, jstring pattern) {
+    if (!input || !pattern) return result(env, "Select a file and enter a hex pattern.");
+    const char* raw = env->GetStringUTFChars(pattern, nullptr);
+    if (!raw) return result(env, "Could not read pattern.");
+    std::string text(raw);
+    env->ReleaseStringUTFChars(pattern, raw);
+    std::vector<std::uint8_t> needle;
+    int high = -1;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char ch = text[i];
+        if (ch == ' ' || ch == '\n' || ch == '\t' || ch == ',' || ch == ':') {
+            if (high != -1) return result(env, "Incomplete hexadecimal byte.");
+            continue;
+        }
+        if (high == -1 && ch == '0' && i + 1 < text.size() && (text[i + 1] == 'x' || text[i + 1] == 'X')) {
+            ++i;
+            continue;
+        }
+        int value = nibble(ch);
+        if (value < 0) return result(env, "Invalid hexadecimal character.");
+        if (high < 0) high = value;
+        else {
+            needle.push_back(static_cast<std::uint8_t>((high << 4) | value));
+            high = -1;
+        }
+        if (needle.size() > 4096) return result(env, "Pattern exceeds 4096 bytes.");
+    }
+    if (high != -1 || needle.empty()) return result(env, "Enter complete hexadecimal bytes.");
+    auto data = bytes(env, input);
+    std::ostringstream output;
+    std::size_t total = 0;
+    auto it = data.begin();
+    while (it != data.end()) {
+        auto found = std::search(it, data.end(), needle.begin(), needle.end());
+        if (found == data.end()) break;
+        std::size_t offset = static_cast<std::size_t>(found - data.begin());
+        if (total < 100) output << "0x" << hex(offset, 8) << '\n';
+        ++total;
+        it = found + 1;
+    }
+    if (!total) return result(env, "No matches found.");
+    output << "\nTotal matches: " << total;
+    if (total > 100) output << " (first 100 shown)";
+    return result(env, output.str());
 }
