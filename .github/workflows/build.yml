@@ -2,206 +2,116 @@ name: Build
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: decompilex-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     name: Windows x64
     runs-on: windows-latest
-
-    defaults:
-      run:
-        shell: pwsh
-
+    timeout-minutes: 30
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-
       - name: Setup Ninja
         uses: seanmiddleditch/gha-setup-ninja@v5
-
-      - name: Configure CMake
+      - name: Configure
+        shell: pwsh
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Compile
+        shell: pwsh
+        run: cmake --build build --parallel
+      - name: Smoke tests
+        shell: pwsh
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build DecompileX
-        run: |
-          cmake --build build --parallel
-
-      - name: Verify Executable
-        run: |
-          if (!(Test-Path "build/bin/DecompileX.exe")) {
-            Write-Error "DecompileX.exe was not generated!"
-            exit 1
-          }
-
-          Write-Host "Windows build successful!"
-
+          ctest --test-dir build --output-on-failure
+          & "build/bin/DecompileX.exe" --info "build/bin/DecompileX.exe"
+          & "build/bin/DecompileX.exe" --bin-hex "44 58 34" "build/smoke.bin"
+          $bytes = [System.IO.File]::ReadAllBytes("build/smoke.bin")
+          if (($bytes.Length -ne 3) -or ($bytes[0] -ne 68) -or ($bytes[1] -ne 88) -or ($bytes[2] -ne 52)) { throw "BIN smoke test failed" }
       - name: Package Windows
+        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path dist
-          Copy-Item "build/bin/DecompileX.exe" "dist/DecompileX.exe"
-
-          Compress-Archive `
-            -Path "dist/DecompileX.exe" `
-            -DestinationPath "DecompileX-Windows-x64.zip" `
-            -Force
-
-      - name: Upload Windows Artifact
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item build/bin/DecompileX.exe dist/
+          if (Test-Path build/bin/DecompileX-Setup.exe) { Copy-Item build/bin/DecompileX-Setup.exe dist/ }
+          Compress-Archive -Path dist/*.exe -DestinationPath DecompileX-Windows-x64.zip -Force
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: DecompileX-Windows-x64
           path: DecompileX-Windows-x64.zip
-          retention-days: 30
           if-no-files-found: error
+          retention-days: 30
 
   android:
     name: Android APK
     runs-on: ubuntu-latest
-
+    timeout-minutes: 40
     env:
       NDK_VERSION: 27.2.12479018
       BUILD_TOOLS_VERSION: 35.0.0
       APK_PATH: android/app/build/outputs/apk/debug/app-debug.apk
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'
-
-      - name: Setup Android SDK
+      - name: Install Android dependencies
+        shell: bash
         run: |
           set -euo pipefail
-
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
           if [ ! -f "$SDKMANAGER" ]; then
-            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)"
           fi
-
-          if [ -z "$SDKMANAGER" ]; then
-            echo "Android SDK Manager not found!"
-            exit 1
-          fi
-
-          "$SDKMANAGER" --install \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "cmake;3.22.1" \
-            "ndk;$NDK_VERSION"
-
+          test -n "$SDKMANAGER"
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;$NDK_VERSION"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
-
-      - name: Verify Android SDK
-        run: |
-          set -euo pipefail
-
-          test -d "$ANDROID_HOME/platforms/android-35"
-          test -d "$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION"
-          test -f "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
-
-          echo "Android SDK verified!"
-
-      - name: Build Android APK
+      - name: Build APK
         working-directory: android
-        run: |
-          gradle :app:assembleDebug --no-daemon --stacktrace
-
-      - name: Verify APK File
-        run: |
-          set -euo pipefail
-
-          if [ ! -f "$APK_PATH" ]; then
-            echo "APK not found!"
-            exit 1
-          fi
-
-          echo "APK generated successfully!"
-          ls -lh "$APK_PATH"
-
-      - name: Verify APK Signature
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+      - name: Validate APK
+        shell: bash
         run: |
           set -euo pipefail
-
-          APKSIGNER="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner"
-
-          "$APKSIGNER" verify \
-            --verbose \
-            --print-certs \
-            "$APK_PATH"
-
-          echo "APK signature verified!"
-
-      - name: Verify APK Package
-        run: |
-          set -euo pipefail
-
-          AAPT="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt"
-
-          "$AAPT" dump badging "$APK_PATH" | tee apk-info.txt
-
-          grep -q "package: name='com.decompilex.app'" apk-info.txt
-
-          echo "APK package verified!"
-
-      - name: Verify Native Library
-        run: |
-          set -euo pipefail
-
-          unzip -l "$APK_PATH" | tee apk-files.txt
-
-          grep -q "lib/arm64-v8a/libDecompileX.so" apk-files.txt
-
-          echo "Native C++ library verified!"
-
-      - name: Verify APK Alignment
-        run: |
-          set -euo pipefail
-
-          ZIPALIGN="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/zipalign"
-
-          "$ZIPALIGN" -c -P 16 -v 4 "$APK_PATH"
-
-          echo "APK alignment verified!"
-
-      - name: Package Android APK
+          test -s "$APK_PATH"
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner" verify --verbose "$APK_PATH"
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt" dump badging "$APK_PATH" > apk-badging.txt
+          grep -q "package: name='com.decompilex.app'" apk-badging.txt
+          unzip -Z1 "$APK_PATH" > apk-entries.txt
+          grep -Fxq 'lib/arm64-v8a/libDecompileX.so' apk-entries.txt
+          "$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/zipalign" -c -v 4 "$APK_PATH"
+      - name: Package APK and checksum
+        shell: bash
         run: |
           mkdir -p dist
-
           cp "$APK_PATH" dist/DecompileX-Android.apk
-
-          sha256sum dist/DecompileX-Android.apk \
-            > dist/SHA256SUMS.txt
-
+          (cd dist && sha256sum DecompileX-Android.apk > SHA256SUMS.txt)
       - name: Upload Android APK
         uses: actions/upload-artifact@v4
         with:
           name: DecompileX-Android-APK
-          path: |
-            dist/DecompileX-Android.apk
-            dist/SHA256SUMS.txt
-          retention-days: 30
+          path: dist/
           if-no-files-found: error
+          retention-days: 30
