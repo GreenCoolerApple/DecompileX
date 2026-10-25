@@ -70,6 +70,7 @@ public class MainActivity extends Activity {
     private native byte[] hexToBytes(String hex);
     private native String findHex(byte[] data, String pattern);
     private native String analyzePspBytes(byte[] data);
+    private native String scanIsoCodeNative(int fd);
     private native String compileIsoNative(String source, String destination, String label);
 
     @Override
@@ -171,7 +172,7 @@ public class MainActivity extends Activity {
         Button pspExecutable = button("OPEN PSP EBOOT.PBP / EBOOT.BIN / ELF", false);
         root.addView(pspExecutable);
         pspExecutable.setOnClickListener(v -> openDocument(OPEN_PSP_EXEC));
-        Button pspIso = button("SCAN OPENED PSP ISO FOR EXECUTABLES", false);
+        Button pspIso = button("SCAN ISO FOR GAME CODE", false);
         root.addView(pspIso);
         pspIso.setOnClickListener(v -> scanPspIso());
 
@@ -408,31 +409,14 @@ public class MainActivity extends Activity {
     private void scanPspIso() {
         Uri source = selectedIso;
         if (source == null) { showMessage("Open a PSP ISO first."); return; }
-        showResult("PSP ISO SCANNER", "Scanning executable entries...");
+        showResult("ISO GAME CODE SCANNER", "Scanning ISO 9660 entries and binary signatures...");
         worker.execute(() -> {
-            try (IsoReader reader = new IsoReader(getContentResolver(), source)) {
-                StringBuilder report = new StringBuilder("PSP ISO executable scan\n\n");
-                int matches = 0;
-                for (IsoReader.Entry entry : reader.getEntries()) {
-                    if (entry.directory) continue;
-                    String name = entry.path.toUpperCase(java.util.Locale.ROOT);
-                    if (!(name.endsWith("EBOOT.BIN") || name.endsWith("BOOT.BIN") ||
-                          name.endsWith("EBOOT.PBP") || name.endsWith(".ELF") || name.endsWith(".PRX"))) continue;
-                    matches++;
-                    report.append("FILE: ").append(entry.path).append("\nSize: ").append(entry.size).append(" bytes\n");
-                    if (entry.size > 64L * 1024 * 1024) {
-                        report.append("Too large for in-memory disassembly (64 MiB limit).\n\n");
-                    } else {
-                        byte[] bytes = reader.readEntry(entry, 64 * 1024 * 1024);
-                        report.append(analyzePspBytes(bytes)).append("\n\n");
-                    }
-                    if (report.length() > 120000) { report.append("Output truncated.\n"); break; }
-                }
-                if (matches == 0) report.append("No matching executable names found.\n");
-                String result = report.toString();
-                runOnUiThread(() -> showResult("PSP GAME CODE ANALYZER", result));
+            try (android.os.ParcelFileDescriptor descriptor = getContentResolver().openFileDescriptor(source, "r")) {
+                if (descriptor == null) throw new Exception("Cannot open ISO descriptor.");
+                String report = scanIsoCodeNative(descriptor.getFd());
+                runOnUiThread(() -> showResult("ISO GAME CODE SCANNER", report));
             } catch (Exception error) {
-                runOnUiThread(() -> showResult("PSP ANALYSIS ERROR", String.valueOf(error.getMessage())));
+                runOnUiThread(() -> showResult("ISO SCAN ERROR", String.valueOf(error.getMessage())));
             }
         });
     }
