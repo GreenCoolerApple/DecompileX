@@ -9,10 +9,10 @@ project(DecompileX
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(DECOMPILEX_BUILD_APK_LIB "Build Android JNI library" OFF)
+option(DECOMPILEX_BUILD_SETUP "Build setup utility" ON)
 option(DECOMPILEX_ENABLE_WARNINGS "Enable compiler warnings" ON)
 
 set(DECOMPILEX_SOURCE_DIR
@@ -23,32 +23,38 @@ set(DECOMPILEX_BACKEND_DIR
     "${DECOMPILEX_SOURCE_DIR}/backend"
 )
 
-set(DECOMPILEX_MAIN_SOURCES
-    "${DECOMPILEX_SOURCE_DIR}/Main.cpp"
+set(DECOMPILEX_BACKEND_SOURCES
     "${DECOMPILEX_BACKEND_DIR}/ZipGenerator.cpp"
     "${DECOMPILEX_BACKEND_DIR}/ExeCompiler.cpp"
+    "${DECOMPILEX_BACKEND_DIR}/ISOCompiler.cpp"
 )
 
 set(DECOMPILEX_BACKEND_HEADERS
     "${DECOMPILEX_BACKEND_DIR}/ZipGenerator.hpp"
     "${DECOMPILEX_BACKEND_DIR}/ExeCompiler.hpp"
+    "${DECOMPILEX_BACKEND_DIR}/ISOCompiler.hpp"
 )
 
-set(DECOMPILEX_ANDROID_BRIDGE
+set(DECOMPILEX_NATIVE_BRIDGE
     "${DECOMPILEX_SOURCE_DIR}/android/NativeBridge.cpp"
 )
 
+foreach(SOURCE_FILE IN LISTS DECOMPILEX_BACKEND_SOURCES)
+    if(NOT EXISTS "${SOURCE_FILE}")
+        message(FATAL_ERROR
+            "Missing backend source: ${SOURCE_FILE}"
+        )
+    endif()
+endforeach()
+
 if(ANDROID AND DECOMPILEX_BUILD_APK_LIB)
     add_library(DecompileX SHARED
-        "${DECOMPILEX_ANDROID_BRIDGE}"
-        "${DECOMPILEX_BACKEND_DIR}/ZipGenerator.cpp"
-        "${DECOMPILEX_BACKEND_DIR}/ExeCompiler.cpp"
+        "${DECOMPILEX_NATIVE_BRIDGE}"
+        ${DECOMPILEX_BACKEND_SOURCES}
         ${DECOMPILEX_BACKEND_HEADERS}
     )
 
-    target_link_libraries(DecompileX PRIVATE
-        log
-    )
+    target_link_libraries(DecompileX PRIVATE log)
 else()
     set(DECOMPILEX_PLATFORM_SOURCES)
 
@@ -67,7 +73,8 @@ else()
     endif()
 
     add_executable(DecompileX
-        ${DECOMPILEX_MAIN_SOURCES}
+        "${DECOMPILEX_SOURCE_DIR}/Main.cpp"
+        ${DECOMPILEX_BACKEND_SOURCES}
         ${DECOMPILEX_BACKEND_HEADERS}
         ${DECOMPILEX_PLATFORM_SOURCES}
     )
@@ -137,6 +144,22 @@ foreach(CONFIG Debug Release RelWithDebInfo MinSizeRel)
         "${CMAKE_BINARY_DIR}/lib"
     )
 endforeach()
+
+if(DECOMPILEX_BUILD_SETUP AND NOT ANDROID)
+    add_executable(DecompileX-Setup
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/Setup.cpp"
+    )
+
+    target_compile_features(DecompileX-Setup PRIVATE cxx_std_17)
+
+    set_target_properties(DecompileX-Setup PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    )
+
+    install(TARGETS DecompileX-Setup
+        RUNTIME DESTINATION bin
+    )
+endif()
 
 install(TARGETS DecompileX
     RUNTIME DESTINATION bin
