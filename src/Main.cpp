@@ -8,6 +8,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <chrono>
+#include <memory>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -238,12 +240,26 @@ namespace
         }
     }
 
+    bool hasEnvironment(const char* name)
+    {
+#if defined(_WIN32)
+        char* value = nullptr;
+        std::size_t size = 0;
+        if (_dupenv_s(&value, &size, name) != 0) return false;
+        const bool present = value != nullptr;
+        std::free(value);
+        return present;
+#else
+        return std::getenv(name) != nullptr;
+#endif
+    }
+
     bool useColor()
     {
         static const bool enabled = [] {
-            if (std::getenv("NO_COLOR")) return false;
+            if (hasEnvironment("NO_COLOR")) return false;
 #if defined(_WIN32)
-            return std::getenv("WT_SESSION") || std::getenv("ANSICON") || std::getenv("TERM");
+            return hasEnvironment("WT_SESSION") || hasEnvironment("ANSICON") || hasEnvironment("TERM");
 #else
             const char* term = std::getenv("TERM");
             return term && std::string(term) != "dumb";
@@ -266,30 +282,138 @@ namespace
     void printBanner()
     {
         std::cout << color("1;92")
-                  << "\n  +======================================================+\n"
-                  << "  |  D E C O M P I L E X                    v0.2.0      |\n"
-                  << "  |  Binary Lab  /  Build Studio  /  Archive Tools      |\n"
-                  << "  +======================================================+\n"
+                  << "\n  +============================================================+\n"
+                  << "  |  D E C O M P I L E X                         v0.3.0     |\n"
+                  << "  |  BINARY FORENSICS  /  ARCHIVE LAB  /  BUILD STUDIO        |\n"
+                  << "  +============================================================+\n"
                   << color("0")
-                  << "  C++17  |  Windows / Android  |  Offline Toolkit\n";
+                  << "  C++17  |  Offline analysis  |  Windows / Linux / Android\n";
     }
 
     void printMenu(const std::optional<BinaryInfo>& current)
     {
-        std::cout << "\n" << color("1;96") << "  ACTIVE  " << color("0")
-                  << (current ? current->path.filename().string() : "No binary loaded") << "\n"
-                  << "  ------------------------------------------------------\n"
-                  << color("1;92") << "  BINARY LAB" << color("0") << "\n"
-                  << "  [1] Open binary            [2] File information\n"
-                  << "  [3] Hex viewer             [4] Extract ASCII strings\n"
-                  << "  [5] Entropy analysis       [6] Export analysis ZIP\n\n"
-                  << color("1;92") << "  ARCHIVE STUDIO" << color("0") << "\n"
-                  << "  [7] Create ZIP             [8] Create ISO 9660\n\n"
-                  << color("1;92") << "  BUILD STUDIO" << color("0") << "\n"
-                  << "  [9] Compile C++            [10] Detect compilers\n\n"
-                  << color("1;92") << "  UTILITIES" << color("0") << "\n"
-                  << "  [11] Export hex dump       [12] Help / CLI commands\n"
-                  << "  [0] Exit\n\n";
+        std::cout << "\n" << color("1;96") << "  WORKSPACE  " << color("0")
+                  << (current ? current->path.filename().string() : "No file selected") << "\n"
+                  << "  ------------------------------------------------------------\n"
+                  << color("1;92") << "  [ BINARY FORENSICS ]" << color("0") << "\n"
+                  << "   1  Open binary                 2  File information\n"
+                  << "   3  Hex viewer                  4  Extract ASCII strings\n"
+                  << "   5  Entropy analysis            6  Export analysis ZIP\n"
+                  << "  13  CRC32 checksum             14  Compare two binaries\n"
+                  << "  15  Search hexadecimal bytes\n\n"
+                  << color("1;92") << "  [ ARCHIVE LAB ]" << color("0") << "\n"
+                  << "   7  Create ZIP                  8  Create ISO 9660\n\n"
+                  << color("1;92") << "  [ BUILD STUDIO ]" << color("0") << "\n"
+                  << "   9  Compile C++                10  Detect compilers\n\n"
+                  << color("1;92") << "  [ UTILITIES ]" << color("0") << "\n"
+                  << "  11  Export hex dump            12  CLI reference\n"
+                  << "  16  Workspace dashboard         0  Exit\n\n";
+    }
+
+    std::uint32_t crc32File(const fs::path& path)
+    {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) throw std::runtime_error("Cannot open file for checksum.");
+        std::uint32_t crc = 0xffffffffu;
+        std::array<char, 65536> buffer{};
+        while (file)
+        {
+            file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const auto count = file.gcount();
+            for (std::streamsize i = 0; i < count; ++i)
+            {
+                crc ^= static_cast<unsigned char>(buffer[static_cast<std::size_t>(i)]);
+                for (int bit = 0; bit < 8; ++bit)
+                    crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+            }
+        }
+        if (file.bad()) throw std::runtime_error("Failed reading file for checksum.");
+        return ~crc;
+    }
+
+    void showCRC32(const fs::path& path)
+    {
+        std::cout << "  CRC32: " << std::uppercase << std::hex
+                  << std::setw(8) << std::setfill('0') << crc32File(path)
+                  << std::dec << std::nouppercase << std::setfill(' ') << "\n";
+    }
+
+    void compareFiles(const fs::path& first, const fs::path& second)
+    {
+        std::ifstream a(first, std::ios::binary), b(second, std::ios::binary);
+        if (!a || !b) throw std::runtime_error("Cannot open one or both files.");
+        std::array<char, 65536> x{}, y{};
+        std::uint64_t offset = 0, differences = 0;
+        std::vector<std::uint64_t> examples;
+        while (a || b)
+        {
+            a.read(x.data(), static_cast<std::streamsize>(x.size()));
+            b.read(y.data(), static_cast<std::streamsize>(y.size()));
+            const auto na = a.gcount(), nb = b.gcount();
+            const auto total = std::max(na, nb);
+            if (total == 0) break;
+            for (std::streamsize i = 0; i < total; ++i)
+            {
+                if (i >= na || i >= nb || x[static_cast<std::size_t>(i)] != y[static_cast<std::size_t>(i)])
+                {
+                    ++differences;
+                    if (examples.size() < 16) examples.push_back(offset + static_cast<std::uint64_t>(i));
+                }
+            }
+            offset += static_cast<std::uint64_t>(total);
+        }
+        if (a.bad() || b.bad()) throw std::runtime_error("Error comparing files.");
+        std::cout << "  Compared bytes: " << offset << "\n  Different bytes: " << differences << "\n";
+        for (auto pos : examples) std::cout << "    Difference at 0x" << std::hex << pos << std::dec << "\n";
+        if (differences == 0) std::cout << "  Files are identical.\n";
+    }
+
+    std::vector<std::uint8_t> parseHexBytes(const std::string& input)
+    {
+        std::string hex;
+        for (char c : input)
+        {
+            if (std::isspace(static_cast<unsigned char>(c))) continue;
+            if (!std::isxdigit(static_cast<unsigned char>(c))) throw std::runtime_error("Invalid hex character.");
+            hex.push_back(c);
+        }
+        if (hex.empty() || hex.size() % 2 != 0 || hex.size() > 512)
+            throw std::runtime_error("Use 1 to 256 bytes, e.g. 4D 5A 90 00.");
+        std::vector<std::uint8_t> bytes;
+        for (std::size_t i = 0; i < hex.size(); i += 2)
+            bytes.push_back(static_cast<std::uint8_t>(std::stoul(hex.substr(i, 2), nullptr, 16)));
+        return bytes;
+    }
+
+    void searchBytes(const fs::path& path, const std::vector<std::uint8_t>& pattern)
+    {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) throw std::runtime_error("Cannot open binary.");
+        std::vector<std::size_t> prefix(pattern.size(), 0);
+        for (std::size_t i = 1, j = 0; i < pattern.size(); ++i)
+        {
+            while (j && pattern[i] != pattern[j]) j = prefix[j - 1];
+            if (pattern[i] == pattern[j]) ++j;
+            prefix[i] = j;
+        }
+        std::uint64_t offset = 0, found = 0;
+        std::size_t j = 0;
+        char ch;
+        while (file.get(ch))
+        {
+            const auto byte = static_cast<std::uint8_t>(static_cast<unsigned char>(ch));
+            while (j && byte != pattern[j]) j = prefix[j - 1];
+            if (byte == pattern[j]) ++j;
+            if (j == pattern.size())
+            {
+                if (found < 32) std::cout << "  Match at 0x" << std::hex << (offset + 1 - pattern.size()) << std::dec << "\n";
+                ++found;
+                j = prefix[j - 1];
+            }
+            ++offset;
+        }
+        if (file.bad()) throw std::runtime_error("Error searching binary.");
+        std::cout << "  Total matches: " << found << " (showing up to 32)\n";
     }
 
     std::string extractStrings(const fs::path& path, std::size_t minLength, std::size_t maxResults)
@@ -391,6 +515,9 @@ namespace
                   << "  DecompileX --entropy <file>\n"
                   << "  DecompileX --iso <directory> <output.iso> [volume]\n"
                   << "  DecompileX --zip <directory> <output.zip>\n"
+                  << "  DecompileX --crc32 <file>\n"
+                  << "  DecompileX --compare <file-a> <file-b>\n"
+                  << "  DecompileX --findhex <file> <hex-pattern>\n"
                   << "  ISO output must be outside its source directory.\n";
     }
 
@@ -552,6 +679,30 @@ namespace
                     saveHex(*current);
                 }
                 else if (choice == "12") { heading("COMMAND LINE HELP"); showHelp(); }
+                else if (choice == "13")
+                {
+                    if (!current) throw std::runtime_error("Open a binary first.");
+                    heading("CRC32 CHECKSUM"); showCRC32(current->path);
+                }
+                else if (choice == "14")
+                {
+                    const auto first = current ? current->path.string() : prompt("First binary: ");
+                    const auto second = prompt("Second binary: ");
+                    heading("BINARY COMPARISON"); compareFiles(first, second);
+                }
+                else if (choice == "15")
+                {
+                    if (!current) throw std::runtime_error("Open a binary first.");
+                    const auto pattern = parseHexBytes(prompt("Hex pattern (e.g. 4D 5A): "));
+                    heading("HEX PATTERN SEARCH"); searchBytes(current->path, pattern);
+                }
+                else if (choice == "16")
+                {
+                    heading("WORKSPACE DASHBOARD");
+                    if (current) { std::cout << describe(*current); showCRC32(current->path); }
+                    else std::cout << "  No binary selected.\n";
+                    showCompilers();
+                }
                 else std::cout << "Unknown option.\n";
             }
             catch (const std::exception& error)
@@ -571,6 +722,9 @@ int main(int argc, char** argv)
         if (argc < 2) return runInteractive();
         const std::string command = argv[1];
         if (command == "--help" || command == "-h") { showHelp(); return 0; }
+        if (command == "--crc32" && argc == 3) { showCRC32(argv[2]); return 0; }
+        if (command == "--compare" && argc == 4) { compareFiles(argv[2], argv[3]); return 0; }
+        if (command == "--findhex" && argc == 4) { searchBytes(argv[2], parseHexBytes(argv[3])); return 0; }
         if (command == "--info" && argc == 3)
         {
             std::cout << describe(inspect(argv[2]));
