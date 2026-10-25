@@ -6,6 +6,8 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <chrono>
+#include <system_error>
 #include <set>
 #include <vector>
 
@@ -91,6 +93,11 @@ void writePathTable(std::ofstream& out,const std::vector<Node*>& dirs,bool big,s
 }
 }
 ISOResult ISOCompiler::compile(const fs::path& sourceDirectory,const fs::path& outputISO,const std::string& volumeLabel) {
+    ISOOptions options;
+    options.volumeLabel = volumeLabel;
+    return compile(sourceDirectory, outputISO, options);
+}
+ISOResult ISOCompiler::compile(const fs::path& sourceDirectory,const fs::path& outputISO,const ISOOptions& options) {
     ISOResult result;
     std::error_code ec;
     if (!fs::is_directory(sourceDirectory,ec) || ec) { result.message="Source directory does not exist."; return result; }
@@ -104,6 +111,12 @@ ISOResult ISOCompiler::compile(const fs::path& sourceDirectory,const fs::path& o
     if (ec) { result.message="Cannot resolve output path."; return result; }
     auto isInside=[&](const fs::path& candidate) { auto a=source.begin(),b=candidate.begin(); for (;a!=source.end() && b!=candidate.end() && *a==*b;++a,++b) {} return a==source.end(); };
     if (isInside(output)) { result.message="Output ISO must be outside the source directory."; return result; }
+    ec.clear();
+    if (fs::is_symlink(output, ec)) { result.message="Output cannot be a symbolic link."; return result; }
+    ec.clear();
+    if (fs::exists(output, ec) && !options.overwrite) { result.message="Output already exists."; return result; }
+    if (ec) { result.message="Cannot inspect output path."; return result; }
+    if (options.volumeLabel.size() > 32) { result.message="Volume label exceeds 32 characters."; return result; }
     Node root; root.name=std::string(1,'\0'); root.source=source;
     std::vector<Node*> directories{&root}; std::vector<Node*> files;
     std::size_t count=0;
@@ -159,14 +172,23 @@ ISOResult ISOCompiler::compile(const fs::path& sourceDirectory,const fs::path& o
     if (cursor>std::numeric_limits<std::uint32_t>::max() || cursor*Sector>static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max())) {
         result.message="ISO image exceeds supported size."; return result;
     }
-    std::ofstream out(output,std::ios::binary|std::ios::trunc);
+    fs::path temporary;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        temporary = output;
+        temporary += ".tmp-" + std::to_string(stamp) + "-" + std::to_string(attempt);
+        ec.clear();
+        if (!fs::exists(temporary, ec) && !ec) break;
+        if (attempt == 99 || ec) { result.message="Cannot allocate temporary output path."; return result; }
+    }
+    std::ofstream out(temporary,std::ios::binary|std::ios::trunc);
     if (!out) { result.message="Cannot create output ISO."; return result; }
     pad(out,16ull*Sector);
     std::array<std::uint8_t,Sector> pvd{};
     pvd[0]=1; std::memcpy(pvd.data()+1,"CD001",5); pvd[6]=1;
     std::fill(pvd.begin()+8,pvd.begin()+40,' ');
     std::fill(pvd.begin()+40,pvd.begin()+72,' ');
-    std::string label=volumeLabel.empty()?"DECOMPILEX":volumeLabel;
+    std::string label=options.volumeLabel.empty()?"DECOMPILEX":options.volumeLabel;
     std::transform(label.begin(),label.end(),label.begin(),[](unsigned char c){return static_cast<char>(std::toupper(c));});
     label.resize(std::min<std::size_t>(label.size(),32));
     for (char& c:label) if (!((c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c==' ')) c='_';
@@ -187,12 +209,12 @@ ISOResult ISOCompiler::compile(const fs::path& sourceDirectory,const fs::path& o
     std::array<char,64*1024> buffer{};
     for (const Node* file:files) {
         std::ifstream in(file->source,std::ios::binary);
-        if (!in) { result.message="Cannot read file: "+file->source.string(); out.close(); fs::remove(output,ec); return result; }
+        if (!in) { result.message="Cannot read file: "+file->source.string(); out.close(); fs::remove(temporary,ec); return result; }
         std::uint64_t remaining=file->size;
         while (remaining) {
             auto n=static_cast<std::streamsize>(std::min<std::uint64_t>(remaining,buffer.size()));
             in.read(buffer.data(),n);
-            if (in.gcount()!=n) { result.message="File read failed."; out.close(); fs::remove(output,ec); return result; }
+            if (in.gcount()!=n) { result.message="File read failed."; out.close(); fs::remove(temporary,ec); return result; }
             out.write(buffer.data(),n);
             remaining-=static_cast<std::uint64_t>(n);
         }
@@ -200,8 +222,49 @@ ISOResult ISOCompiler::compile(const fs::path& sourceDirectory,const fs::path& o
         ++result.filesAdded;
     }
     out.flush(); bool ok=out.good(); out.close();
-    if (!ok) { result.message="Failed to write ISO."; fs::remove(output,ec); return result; }
+    if (!ok) { result.message="Failed to write ISO."; fs::remove(temporary,ec); return result; }
+    if (options.verifyOutput) {
+        ec.clear();
+        auto actualSize = fs::file_size(temporary, ec);
+        if (ec || actualSize != cursor * Sector) {
+            result.message="ISO size verification failed.";
+            fs::remove(temporary,ec);
+            return result;
+        }
+        std::ifstream check(temporary, std::ios::binary);
+        std::array<char, 7> header{};
+        check.seekg(16ull * Sector);
+        check.read(header.data(), static_cast<std::streamsize>(header.size()));
+        if (!check || header[0] != 1 || std::memcmp(header.data()+1,"CD001",5) != 0 || header[6] != 1) {
+            result.message="ISO descriptor verification failed.";
+            check.close();
+            fs::remove(temporary,ec);
+            return result;
+        }
+    }
+    ec.clear();
+    if (fs::exists(output, ec)) {
+        if (!options.overwrite) {
+            result.message="Output already exists.";
+            fs::remove(temporary,ec);
+            return result;
+        }
+        fs::remove(output, ec);
+        if (ec) {
+            result.message="Cannot replace existing output: " + ec.message();
+            fs::remove(temporary,ec);
+            return result;
+        }
+    }
+    ec.clear();
+    fs::rename(temporary, output, ec);
+    if (ec) {
+        result.message="Cannot finalize output: " + ec.message();
+        fs::remove(temporary,ec);
+        return result;
+    }
     result.success=true; result.message="ISO image created successfully."; result.bytesWritten=cursor*Sector;
+    result.directoriesAdded=static_cast<std::uint32_t>(directories.size());
     return result;
 }
 }
