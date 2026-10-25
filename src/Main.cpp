@@ -1,3 +1,4 @@
+#include "backend/IsoCodeScanner.hpp"
 #include "backend/ExeCompiler.hpp"
 #include "backend/ZipGenerator.hpp"
 #include "backend/ISOCompiler.hpp"
@@ -532,6 +533,7 @@ namespace
                   << "  DecompileX --psp-analyze <EBOOT.PBP|EBOOT.BIN|ELF|PRX> [instructions]\n"
                   << "  DecompileX --psp-report <file> <report.txt> [instructions]\n"
                   << "  DecompileX --psp-scan <extracted-directory>\n"
+                  << "  DecompileX --iso-code-scan <game.iso>\n"
                   << "  PSP analysis reads at most 64 MiB per executable.\n"
                   << "  ISO output must be outside its source directory.\n";
     }
@@ -923,6 +925,12 @@ int main(int argc, char** argv)
     {
         if (argc < 2) return runInteractive();
         const std::string command = argv[1];
+        if (command == "--iso-code-scan" && argc == 3)
+        {
+            const auto report = DecompileX::IsoCodeScanner::scan(argv[2]);
+            std::cout << report.formatText();
+            return report.success ? 0 : 1;
+        }
         if (command == "--psp-analyze" && (argc == 3 || argc == 4))
         {
             std::cout << pspAnalysis(argv[2], argc == 4 ? pspInstructionLimit(argv[3]) : 160);
