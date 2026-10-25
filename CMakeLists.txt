@@ -10,19 +10,24 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-option(DECOMPILEX_BUILD_SHARED "Build DecompileX as a shared library on Android" OFF)
-
 file(GLOB_RECURSE DECOMPILEX_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
 )
 
-if(ANDROID AND DECOMPILEX_BUILD_SHARED)
+option(DECOMPILEX_BUILD_APK_LIB "Build Android JNI library" OFF)
+
+if(ANDROID AND DECOMPILEX_BUILD_APK_LIB)
     add_library(DecompileX SHARED
-        ${DECOMPILEX_SOURCES}
+        src/android/NativeBridge.cpp
     )
+
+    target_link_libraries(DecompileX PRIVATE log)
+
 else()
+    list(REMOVE_ITEM DECOMPILEX_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/android/NativeBridge.cpp"
+    )
+
     add_executable(DecompileX
         ${DECOMPILEX_SOURCES}
     )
@@ -36,35 +41,6 @@ target_include_directories(DecompileX PRIVATE
 target_compile_definitions(DecompileX PRIVATE
     DECOMPILEX_VERSION="${PROJECT_VERSION}"
 )
-
-if(ANDROID)
-    target_compile_definitions(DecompileX PRIVATE
-        DECOMPILEX_ANDROID=1
-    )
-
-    if(CMAKE_ANDROID_ARCH_ABI)
-        message(STATUS "Android ABI: ${CMAKE_ANDROID_ARCH_ABI}")
-    elseif(ANDROID_ABI)
-        message(STATUS "Android ABI: ${ANDROID_ABI}")
-    endif()
-
-    message(STATUS "Android API Level: ${ANDROID_PLATFORM}")
-
-elseif(WIN32)
-    target_compile_definitions(DecompileX PRIVATE
-        DECOMPILEX_WINDOWS=1
-    )
-
-elseif(APPLE)
-    target_compile_definitions(DecompileX PRIVATE
-        DECOMPILEX_MACOS=1
-    )
-
-elseif(UNIX)
-    target_compile_definitions(DecompileX PRIVATE
-        DECOMPILEX_LINUX=1
-    )
-endif()
 
 if(MSVC)
     target_compile_options(DecompileX PRIVATE
@@ -98,18 +74,7 @@ foreach(CONFIG Debug Release RelWithDebInfo MinSizeRel)
     )
 endforeach()
 
-if(ANDROID)
-    if(DECOMPILEX_BUILD_SHARED)
-        install(TARGETS DecompileX
-            LIBRARY DESTINATION lib
-        )
-    else()
-        install(TARGETS DecompileX
-            RUNTIME DESTINATION bin
-        )
-    endif()
-else()
-    install(TARGETS DecompileX
-        RUNTIME DESTINATION bin
-    )
-endif()
+install(TARGETS DecompileX
+    RUNTIME DESTINATION bin
+    LIBRARY DESTINATION lib
+)
