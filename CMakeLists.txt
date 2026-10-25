@@ -35,6 +35,7 @@ set(DECOMPILEX_BACKEND_SOURCES
     "${DECOMPILEX_BACKEND_DIR}/ISOCompiler.cpp"
     "${DECOMPILEX_BACKEND_DIR}/BinCompiler.cpp"
     "${DECOMPILEX_BACKEND_DIR}/PspAnalyzer.cpp"
+    "${DECOMPILEX_BACKEND_DIR}/IsoCodeScanner.cpp"
 )
 set(DECOMPILEX_BACKEND_HEADERS
     "${DECOMPILEX_BACKEND_DIR}/ZipGenerator.hpp"
@@ -42,6 +43,7 @@ set(DECOMPILEX_BACKEND_HEADERS
     "${DECOMPILEX_BACKEND_DIR}/ISOCompiler.hpp"
     "${DECOMPILEX_BACKEND_DIR}/BinCompiler.hpp"
     "${DECOMPILEX_BACKEND_DIR}/PspAnalyzer.hpp"
+    "${DECOMPILEX_BACKEND_DIR}/IsoCodeScanner.hpp"
 )
 
 function(decompilex_require_files)
