@@ -1,441 +1,449 @@
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <string>
-#include <filesystem>
-#include <iomanip>
-#include <cstdint>
-#include <limits>
+#include "backend/ExeCompiler.hpp"
+#include "backend/ZipGenerator.hpp"
+
 #include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
 #include <utility>
-#include <system_error>
+#include <string>
+#include <vector>
 
 namespace fs = std::filesystem;
 
-namespace DecompileX
+namespace
 {
-    constexpr std::uintmax_t MAX_FILE_SIZE = 256ULL * 1024 * 1024;
-    constexpr std::size_t HEX_DUMP_LIMIT = 512;
-
-    struct BinaryFile
+    struct BinaryInfo
     {
-        std::string path;
-        std::string format;
-        std::string architecture;
+        fs::path path;
         std::uintmax_t size = 0;
-        std::vector<unsigned char> data;
+        std::string format = "Unknown";
+        std::string architecture = "Unknown";
+        std::string details;
+        std::vector<std::uint8_t> preview;
     };
 
-    std::string getPlatform()
+    std::string trim(const std::string& value)
     {
-#if defined(__ANDROID__)
-        return "Android";
-#elif defined(_WIN32)
-        return "Windows";
-#elif defined(__APPLE__)
-        return "macOS";
-#elif defined(__linux__)
-        return "Linux";
-#else
-        return "Unknown";
-#endif
+        const auto first = value.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos)
+            return {};
+        const auto last = value.find_last_not_of(" \t\r\n");
+        return value.substr(first, last - first + 1);
     }
 
-    std::string getArchitecture()
+    std::string prompt(const std::string& label)
     {
-#if defined(__aarch64__) || defined(_M_ARM64)
-        return "ARM64";
-#elif defined(__arm__) || defined(_M_ARM)
-        return "ARM";
-#elif defined(__x86_64__) || defined(_M_X64)
-        return "x86_64";
-#elif defined(__i386__) || defined(_M_IX86)
-        return "x86";
-#else
-        return "Unknown";
-#endif
+        std::cout << label;
+        std::string value;
+        std::getline(std::cin, value);
+        return trim(value);
     }
 
-    std::uint16_t read16(
-        const std::vector<unsigned char>& data,
-        std::size_t offset,
-        bool littleEndian = true
-    )
+    std::optional<std::uint64_t> parseUnsigned(const std::string& value)
     {
-        if (offset > data.size() ||
-            data.size() - offset < 2)
+        try
+        {
+            std::size_t used = 0;
+            const auto number = std::stoull(value, &used, 0);
+            if (used != value.size())
+                return std::nullopt;
+            return number;
+        }
+        catch (...)
+        {
+            return std::nullopt;
+        }
+    }
+
+    std::uint16_t read16(const std::vector<std::uint8_t>& data, std::size_t pos, bool bigEndian = false)
+    {
+        if (pos > data.size() || data.size() - pos < 2)
             return 0;
-
-        if (littleEndian)
-        {
-            return static_cast<std::uint16_t>(
-                data[offset] |
-                (static_cast<std::uint16_t>(data[offset + 1]) << 8)
-            );
-        }
-
-        return static_cast<std::uint16_t>(
-            (static_cast<std::uint16_t>(data[offset]) << 8) |
-            data[offset + 1]
-        );
+        if (bigEndian)
+            return static_cast<std::uint16_t>((data[pos] << 8) | data[pos + 1]);
+        return static_cast<std::uint16_t>(data[pos] | (data[pos + 1] << 8));
     }
 
-    std::uint32_t read32(
-        const std::vector<unsigned char>& data,
-        std::size_t offset
-    )
+    std::uint32_t read32(const std::vector<std::uint8_t>& data, std::size_t pos, bool bigEndian = false)
     {
-        if (offset > data.size() ||
-            data.size() - offset < 4)
+        if (pos > data.size() || data.size() - pos < 4)
             return 0;
-
-        return static_cast<std::uint32_t>(data[offset]) |
-               (static_cast<std::uint32_t>(data[offset + 1]) << 8) |
-               (static_cast<std::uint32_t>(data[offset + 2]) << 16) |
-               (static_cast<std::uint32_t>(data[offset + 3]) << 24);
+        if (bigEndian)
+            return (static_cast<std::uint32_t>(data[pos]) << 24) |
+                   (static_cast<std::uint32_t>(data[pos + 1]) << 16) |
+                   (static_cast<std::uint32_t>(data[pos + 2]) << 8) |
+                   static_cast<std::uint32_t>(data[pos + 3]);
+        return static_cast<std::uint32_t>(data[pos]) |
+               (static_cast<std::uint32_t>(data[pos + 1]) << 8) |
+               (static_cast<std::uint32_t>(data[pos + 2]) << 16) |
+               (static_cast<std::uint32_t>(data[pos + 3]) << 24);
     }
 
-    std::string detectFormat(
-        const std::vector<unsigned char>& data
-    )
+    std::string machineName(std::uint32_t machine)
     {
-        if (data.size() >= 4)
+        switch (machine)
         {
-            if (data[0] == 0x7F &&
-                data[1] == 'E' &&
-                data[2] == 'L' &&
-                data[3] == 'F')
-                return "ELF";
-
-            if (data[0] == 'P' &&
-                data[1] == 'K' &&
-                data[2] == 0x03 &&
-                data[3] == 0x04)
-                return "ZIP / APK / JAR";
-
-            if (data[0] == 0xCA &&
-                data[1] == 0xFE &&
-                data[2] == 0xBA &&
-                data[3] == 0xBE)
-                return "Java Class / Mach-O Universal";
-
-            if ((data[0] == 0xFE && data[1] == 0xED &&
-                 data[2] == 0xFA && data[3] == 0xCE) ||
-                (data[0] == 0xCE && data[1] == 0xFA &&
-                 data[2] == 0xED && data[3] == 0xFE) ||
-                (data[0] == 0xFE && data[1] == 0xED &&
-                 data[2] == 0xFA && data[3] == 0xCF) ||
-                (data[0] == 0xCF && data[1] == 0xFA &&
-                 data[2] == 0xED && data[3] == 0xFE))
-                return "Mach-O";
+            case 0x03: case 0x014c: return "x86";
+            case 0x3e: case 0x8664: return "x86-64";
+            case 0x28: case 0x01c0: case 0x01c4: return "ARM";
+            case 0xb7: case 0xaa64: return "ARM64";
+            case 0x08: return "MIPS";
+            case 0xf3: return "RISC-V";
+            default: return "Unknown";
         }
-
-        if (data.size() >= 64 &&
-            data[0] == 'M' &&
-            data[1] == 'Z')
-        {
-            std::uint32_t offset = read32(data, 0x3C);
-
-            if (offset <= data.size() &&
-                data.size() - offset >= 4 &&
-                data[offset] == 'P' &&
-                data[offset + 1] == 'E' &&
-                data[offset + 2] == 0 &&
-                data[offset + 3] == 0)
-                return "Windows PE";
-
-            return "DOS MZ";
-        }
-
-        return "Unknown Binary";
     }
 
-    std::string detectArchitecture(
-        const std::vector<unsigned char>& data,
-        const std::string& format
-    )
+    BinaryInfo inspect(const fs::path& path)
     {
-        if (format == "ELF" && data.size() >= 20)
-        {
-            bool littleEndian = data[5] != 2;
-            std::uint16_t machine = read16(data, 18, littleEndian);
-
-            switch (machine)
-            {
-                case 3: return "x86";
-                case 40: return "ARM";
-                case 62: return "x86_64";
-                case 183: return "ARM64";
-                case 243: return "RISC-V";
-                default: return "Unknown ELF Architecture";
-            }
-        }
-
-        if (format == "Windows PE" && data.size() >= 64)
-        {
-            std::uint32_t offset = read32(data, 0x3C);
-            std::uint16_t machine = read16(data, offset + 4);
-
-            switch (machine)
-            {
-                case 0x014C: return "x86";
-                case 0x8664: return "x86_64";
-                case 0x01C0: return "ARM";
-                case 0xAA64: return "ARM64";
-                default: return "Unknown PE Architecture";
-            }
-        }
-
-        return "Unknown";
-    }
-
-    bool loadFile(
-        const std::string& path,
-        BinaryFile& file
-    )
-    {
+        BinaryInfo info;
+        info.path = path;
         std::error_code ec;
-
         if (!fs::is_regular_file(path, ec) || ec)
-            return false;
-
-        std::uintmax_t size = fs::file_size(path, ec);
-
-        if (ec || size > MAX_FILE_SIZE)
-            return false;
-
-        std::ifstream stream(path, std::ios::binary);
-
-        if (!stream)
-            return false;
-
-        std::vector<unsigned char> buffer(
-            static_cast<std::size_t>(size)
-        );
-
-        if (!buffer.empty())
+            throw std::runtime_error("File not found or not a regular file.");
+        info.size = fs::file_size(path, ec);
+        if (ec)
+            throw std::runtime_error("Cannot read file size.");
+        std::ifstream file(path, std::ios::binary);
+        if (!file)
+            throw std::runtime_error("Cannot open file.");
+        const auto length = static_cast<std::size_t>(std::min<std::uintmax_t>(info.size, 4096));
+        info.preview.resize(length);
+        if (length && !file.read(reinterpret_cast<char*>(info.preview.data()), static_cast<std::streamsize>(length)))
+            throw std::runtime_error("Cannot read file header.");
+        const auto& b = info.preview;
+        if (b.size() >= 4 && b[0] == 0x7f && b[1] == 'E' && b[2] == 'L' && b[3] == 'F')
         {
-            stream.read(
-                reinterpret_cast<char*>(buffer.data()),
-                static_cast<std::streamsize>(buffer.size())
-            );
-
-            if (!stream)
-                return false;
+            info.format = "ELF";
+            const bool big = b.size() > 5 && b[5] == 2;
+            info.architecture = machineName(read16(b, 18, big));
+            info.details = b.size() > 4 && b[4] == 2 ? "64-bit" : "32-bit";
         }
-
-        file.path = path;
-        file.size = size;
-        file.format = detectFormat(buffer);
-        file.architecture = detectArchitecture(buffer, file.format);
-        file.data = std::move(buffer);
-
-        return true;
-    }
-
-    void showInformation(const BinaryFile& file)
-    {
-        std::cout << "\n========== FILE INFORMATION ==========\n";
-        std::cout << "Name: "
-                  << fs::path(file.path).filename().string() << '\n';
-        std::cout << "Path: " << file.path << '\n';
-        std::cout << "Format: " << file.format << '\n';
-        std::cout << "Architecture: " << file.architecture << '\n';
-        std::cout << "Size: " << file.size << " bytes\n";
-        std::cout << "======================================\n";
-    }
-
-    void hexDump(const BinaryFile& file)
-    {
-        std::size_t limit = std::min(
-            file.data.size(),
-            HEX_DUMP_LIMIT
-        );
-
-        std::cout << "\n========== HEX VIEWER ==========\n";
-
-        for (std::size_t i = 0; i < limit; i += 16)
+        else if (b.size() >= 2 && b[0] == 'M' && b[1] == 'Z')
         {
-            std::cout << std::hex
-                      << std::setw(8)
-                      << std::setfill('0')
-                      << i << "  ";
-
-            for (std::size_t j = 0; j < 16; ++j)
+            info.format = "DOS / PE candidate";
+            if (b.size() >= 0x40)
             {
-                if (i + j < limit)
+                const auto pe = read32(b, 0x3c);
+                if (pe <= b.size() && b.size() - pe >= 26 && read32(b, pe) == 0x00004550)
                 {
-                    std::cout << std::setw(2)
-                              << static_cast<unsigned int>(
-                                  file.data[i + j]
-                              ) << ' ';
+                    info.format = "Windows PE";
+                    info.architecture = machineName(read16(b, pe + 4));
+                    const auto magic = read16(b, pe + 24);
+                    info.details = magic == 0x20b ? "PE32+" : magic == 0x10b ? "PE32" : "Unknown optional header";
                 }
                 else
                 {
-                    std::cout << "   ";
+                    info.details = "PE header not found in initial 4 KiB";
                 }
             }
-
-            std::cout << " |";
-
-            for (std::size_t j = 0;
-                 j < 16 && i + j < limit; ++j)
-            {
-                unsigned char c = file.data[i + j];
-
-                std::cout << (
-                    c >= 32 && c <= 126
-                    ? static_cast<char>(c)
-                    : '.'
-                );
-            }
-
-            std::cout << "|\n";
         }
+        else if (b.size() >= 4 && b[0] == 'P' && b[1] == 'K' &&
+                 ((b[2] == 3 && b[3] == 4) || (b[2] == 5 && b[3] == 6) || (b[2] == 7 && b[3] == 8)))
+        {
+            info.format = "ZIP / APK / JAR";
+            info.details = "ZIP container";
+        }
+        else if (b.size() >= 4 && b[0] == 0xca && b[1] == 0xfe && b[2] == 0xba && b[3] == 0xbe)
+        {
+            info.format = "Java class / Mach-O universal";
+            info.details = "Ambiguous magic; deeper parsing required";
+        }
+        else if (b.size() >= 4)
+        {
+            const auto magic = read32(b, 0);
+            if (magic == 0xfeedface || magic == 0xfeedfacf || magic == 0xcefaedfe || magic == 0xcffaedfe)
+            {
+                info.format = "Mach-O";
+                const bool big = magic == 0xcefaedfe || magic == 0xcffaedfe;
+                const auto cpu = read32(b, 4, big);
+                switch (cpu)
+                {
+                    case 7: info.architecture = "x86"; break;
+                    case 0x01000007: info.architecture = "x86-64"; break;
+                    case 12: info.architecture = "ARM"; break;
+                    case 0x0100000c: info.architecture = "ARM64"; break;
+                    default: break;
+                }
+                info.details = (magic == 0xfeedfacf || magic == 0xcffaedfe) ? "64-bit" : "32-bit";
+            }
+        }
+        return info;
+    }
 
-        std::cout << std::dec << std::setfill(' ');
-        std::cout << "================================\n";
+    std::string describe(const BinaryInfo& info)
+    {
+        std::ostringstream out;
+        out << "File: " << info.path.string() << '\n';
+        out << "Size: " << info.size << " bytes\n";
+        out << "Format: " << info.format << '\n';
+        out << "Architecture: " << info.architecture << '\n';
+        if (!info.details.empty())
+            out << "Details: " << info.details << '\n';
+        return out.str();
+    }
+
+    void hexDump(const fs::path& path, std::uint64_t offset, std::size_t count, std::ostream& out)
+    {
+        std::ifstream file(path, std::ios::binary);
+        if (!file)
+            throw std::runtime_error("Cannot open file.");
+        std::error_code ec;
+        const auto fileSize = fs::file_size(path, ec);
+        if (ec || offset > fileSize)
+            throw std::runtime_error("Offset is outside the file.");
+        if (offset > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()))
+            throw std::runtime_error("Offset is too large.");
+        file.seekg(static_cast<std::streamoff>(offset));
+        std::array<unsigned char, 16> buffer{};
+        std::size_t remaining = count;
+        while (remaining > 0 && file)
+        {
+            const auto take = static_cast<std::streamsize>(std::min<std::size_t>(remaining, buffer.size()));
+            file.read(reinterpret_cast<char*>(buffer.data()), take);
+            const auto got = file.gcount();
+            if (got <= 0)
+                break;
+            out << std::hex << std::setfill('0') << std::setw(8) << offset << "  ";
+            for (int i = 0; i < 16; ++i)
+            {
+                if (i < got)
+                    out << std::setw(2) << static_cast<unsigned>(buffer[static_cast<std::size_t>(i)]) << ' ';
+                else
+                    out << "   ";
+                if (i == 7)
+                    out << ' ';
+            }
+            out << " |";
+            for (std::streamsize i = 0; i < got; ++i)
+            {
+                const auto c = buffer[static_cast<std::size_t>(i)];
+                out << (c >= 32 && c <= 126 ? static_cast<char>(c) : '.');
+            }
+            out << "|\n" << std::dec;
+            offset += static_cast<std::uint64_t>(got);
+            remaining -= static_cast<std::size_t>(got);
+        }
     }
 
     void printBanner()
     {
-        std::cout << "\n";
-        std::cout << "========================================\n";
-        std::cout << "               DecompileX               \n";
-        std::cout << "           Game Binary Analyzer         \n";
-        std::cout << "               Version 0.1.0            \n";
-        std::cout << "========================================\n";
-        std::cout << "Platform: " << getPlatform() << '\n';
-        std::cout << "Architecture: " << getArchitecture() << '\n';
+        std::cout << "\n==============================================\n"
+                  << "          DecompileX  |  Toolkit\n"
+                  << "==============================================\n"
+                  << "Binary analysis, ZIP exports and C++ builds\n\n";
     }
 
-    void run()
+    void printMenu(const std::optional<BinaryInfo>& current)
     {
-        BinaryFile currentFile;
-        bool loaded = false;
-        bool running = true;
+        std::cout << "\nCurrent file: " << (current ? current->path.string() : "None") << "\n\n"
+                  << "  [1] Open binary\n"
+                  << "  [2] Show binary information\n"
+                  << "  [3] Hex dump\n"
+                  << "  [4] Export analysis ZIP\n"
+                  << "  [5] Create ZIP from directory\n"
+                  << "  [6] Compile C++ executable\n"
+                  << "  [7] Show compiler availability\n"
+                  << "  [0] Exit\n\n";
+    }
 
-        while (running)
+    void exportAnalysis(const BinaryInfo& info)
+    {
+        const auto value = prompt("Output ZIP path [DecompileX-Report.zip]: ");
+        const fs::path output = value.empty() ? fs::path("DecompileX-Report.zip") : fs::path(value);
+        std::ostringstream dump;
+        hexDump(info.path, 0, 512, dump);
+        DecompileX::ZipGenerator zip;
+        if (!zip.create(output))
+            throw std::runtime_error("Cannot create ZIP file.");
+        const bool addedReport = zip.addText("report/info.txt", describe(info));
+        const bool addedHex = addedReport && zip.addText("report/hex-dump.txt", dump.str());
+        const bool closed = zip.close();
+        if (!addedReport || !addedHex || !closed)
+            throw std::runtime_error("ZIP export failed or is incomplete.");
+        std::cout << "Exported: " << output.string() << '\n';
+    }
+
+    void createDirectoryZip()
+    {
+        const auto source = prompt("Directory to archive: ");
+        const auto target = prompt("Output ZIP path: ");
+        if (source.empty() || target.empty())
+            throw std::runtime_error("Directory and output are required.");
+        DecompileX::ZipGenerator zip;
+        if (!zip.create(target))
+            throw std::runtime_error("Cannot create ZIP file.");
+        const bool added = zip.addDirectory(source);
+        const bool closed = zip.close();
+        if (!added || !closed)
+            throw std::runtime_error("Directory ZIP failed or is incomplete.");
+        std::cout << "Created: " << target << '\n';
+    }
+
+    void showCompilers()
+    {
+        const std::array<DecompileX::CompilerType, 3> types = {
+            DecompileX::CompilerType::MSVC,
+            DecompileX::CompilerType::MinGW,
+            DecompileX::CompilerType::Clang
+        };
+        for (auto type : types)
         {
-            printBanner();
+            std::cout << "  " << DecompileX::ExeCompiler::getCompilerName(type)
+                      << ": " << (DecompileX::ExeCompiler::isCompilerAvailable(type) ? "Available" : "Unavailable") << '\n';
+        }
+    }
 
-            std::cout << "\n[1] Open Binary File\n";
-            std::cout << "[2] File Information\n";
-            std::cout << "[3] Hex Viewer\n";
-            std::cout << "[4] Detect File Format\n";
-            std::cout << "[5] System Information\n";
-            std::cout << "[0] Exit\n";
-            std::cout << "\nSelect: ";
+    void compileCpp()
+    {
+        DecompileX::CompilerOptions options;
+        std::cout << "Enter C++ source paths, one per line. Empty line to finish.\n";
+        while (true)
+        {
+            const auto source = prompt("Source: ");
+            if (source.empty())
+                break;
+            options.sources.emplace_back(source);
+        }
+        if (options.sources.empty())
+            throw std::runtime_error("No source files selected.");
+        const auto output = prompt("Output executable path: ");
+        if (output.empty())
+            throw std::runtime_error("Output path is required.");
+        options.output = output;
+        const auto choice = prompt("Compiler [auto/msvc/mingw/clang]: ");
+        if (choice == "msvc")
+            options.compiler = DecompileX::CompilerType::MSVC;
+        else if (choice == "mingw")
+            options.compiler = DecompileX::CompilerType::MinGW;
+        else if (choice == "clang")
+            options.compiler = DecompileX::CompilerType::Clang;
+        else if (!choice.empty() && choice != "auto")
+            throw std::runtime_error("Unknown compiler selection.");
+        const auto standard = prompt("C++ standard [c++17/c++20] (default c++17): ");
+        if (!standard.empty())
+        {
+            if (standard != "c++17" && standard != "c++20")
+                throw std::runtime_error("Unsupported C++ standard.");
+            options.standard = standard;
+        }
+        std::cout << "Compiling...\n";
+        const auto result = DecompileX::ExeCompiler::compile(options);
+        std::cout << result.message << '\n';
+        if (!result.success)
+            std::cout << "Compiler exit code: " << result.exitCode << '\n';
+        else
+            std::cout << "Output: " << result.output.string() << '\n';
+    }
 
-            int option;
-
-            if (!(std::cin >> option))
+    int runInteractive()
+    {
+        std::optional<BinaryInfo> current;
+        printBanner();
+        while (std::cin)
+        {
+            printMenu(current);
+            const auto choice = prompt("DecompileX> ");
+            if (!std::cin)
+                break;
+            if (choice == "0" || choice == "exit" || choice == "quit")
+                break;
+            try
             {
-                if (std::cin.eof())
-                    break;
-
-                std::cin.clear();
-                std::cin.ignore(
-                    std::numeric_limits<std::streamsize>::max(),
-                    '\n'
-                );
-
-                std::cout << "Invalid input.\n";
-                continue;
-            }
-
-            std::cin.ignore(
-                std::numeric_limits<std::streamsize>::max(),
-                '\n'
-            );
-
-            switch (option)
-            {
-                case 1:
+                if (choice == "1")
                 {
-                    std::string path;
-
-                    std::cout << "\nEnter file path: ";
-                    std::getline(std::cin, path);
-
-                    if (path.size() >= 2 &&
-                        path.front() == '"' &&
-                        path.back() == '"')
-                    {
-                        path = path.substr(1, path.size() - 2);
-                    }
-
-                    BinaryFile newFile;
-
-                    if (loadFile(path, newFile))
-                    {
-                        currentFile = std::move(newFile);
-                        loaded = true;
-
-                        std::cout << "\nFile loaded successfully!\n";
-                        showInformation(currentFile);
-                    }
-                    else
-                    {
-                        std::cout << "\nFailed to load file.\n";
-                    }
-
-                    break;
+                    const auto path = prompt("Binary path: ");
+                    if (path.empty())
+                        continue;
+                    auto selected = inspect(path);
+                    current = std::move(selected);
+                    std::cout << describe(*current);
                 }
-
-                case 2:
-                    if (loaded)
-                        showInformation(currentFile);
-                    else
-                        std::cout << "\nNo file loaded.\n";
-                    break;
-
-                case 3:
-                    if (loaded)
-                        hexDump(currentFile);
-                    else
-                        std::cout << "\nNo file loaded.\n";
-                    break;
-
-                case 4:
-                    if (loaded)
-                    {
-                        std::cout << "\nFormat: "
-                                  << currentFile.format << '\n';
-                        std::cout << "Architecture: "
-                                  << currentFile.architecture << '\n';
-                    }
-                    else
-                    {
-                        std::cout << "\nNo file loaded.\n";
-                    }
-                    break;
-
-                case 5:
-                    std::cout << "\nPlatform: "
-                              << getPlatform() << '\n';
-                    std::cout << "Architecture: "
-                              << getArchitecture() << '\n';
-                    std::cout << "C++ Standard: "
-                              << __cplusplus << '\n';
-                    break;
-
-                case 0:
-                    running = false;
-                    break;
-
-                default:
-                    std::cout << "\nUnknown option.\n";
-                    break;
+                else if (choice == "2")
+                {
+                    if (!current)
+                        throw std::runtime_error("Open a binary first.");
+                    std::cout << describe(*current);
+                }
+                else if (choice == "3")
+                {
+                    if (!current)
+                        throw std::runtime_error("Open a binary first.");
+                    const auto offsetText = prompt("Offset (decimal or 0xHEX) [0]: ");
+                    const auto countText = prompt("Bytes to display [256, max 4096]: ");
+                    const auto offset = offsetText.empty() ? std::optional<std::uint64_t>(0) : parseUnsigned(offsetText);
+                    const auto count = countText.empty() ? std::optional<std::uint64_t>(256) : parseUnsigned(countText);
+                    if (!offset || !count || *count > 4096)
+                        throw std::runtime_error("Invalid offset or byte count.");
+                    hexDump(current->path, *offset, static_cast<std::size_t>(*count), std::cout);
+                }
+                else if (choice == "4")
+                {
+                    if (!current)
+                        throw std::runtime_error("Open a binary first.");
+                    exportAnalysis(*current);
+                }
+                else if (choice == "5")
+                    createDirectoryZip();
+                else if (choice == "6")
+                    compileCpp();
+                else if (choice == "7")
+                    showCompilers();
+                else
+                    std::cout << "Unknown option.\n";
+            }
+            catch (const std::exception& error)
+            {
+                std::cout << "Error: " << error.what() << '\n';
             }
         }
-
-        std::cout << "\nDecompileX closed.\n";
+        std::cout << "Goodbye!\n";
+        return 0;
     }
 }
 
-int main()
+int main(int argc, char** argv)
 {
-    DecompileX::run();
-    return 0;
+    try
+    {
+        if (argc >= 2)
+        {
+            const std::string command = argv[1];
+            if (command == "--help" || command == "-h")
+            {
+                std::cout << "DecompileX\nUsage:\n  DecompileX\n  DecompileX --info <file>\n  DecompileX --hex <file> [offset] [count]\n";
+                return 0;
+            }
+            if (command == "--info" && argc >= 3)
+            {
+                std::cout << describe(inspect(argv[2]));
+                return 0;
+            }
+            if (command == "--hex" && argc >= 3)
+            {
+                const auto offset = argc >= 4 ? parseUnsigned(argv[3]) : std::optional<std::uint64_t>(0);
+                const auto count = argc >= 5 ? parseUnsigned(argv[4]) : std::optional<std::uint64_t>(256);
+                if (!offset || !count || *count > 4096)
+                    throw std::runtime_error("Invalid offset or count (maximum 4096).");
+                hexDump(argv[2], *offset, static_cast<std::size_t>(*count), std::cout);
+                return 0;
+            }
+            std::cerr << "Invalid arguments. Use --help.\n";
+            return 2;
+        }
+        return runInteractive();
+    }
+    catch (const std::exception& error)
+    {
+        std::cerr << "Error: " << error.what() << '\n';
+        return 1;
+    }
 }
