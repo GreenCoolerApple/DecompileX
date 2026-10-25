@@ -3,6 +3,8 @@
     <application
         android:allowBackup="false"
         android:label="DecompileX"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="false">
 
