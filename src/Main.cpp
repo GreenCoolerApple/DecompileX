@@ -2,6 +2,7 @@
 #include "backend/ZipGenerator.hpp"
 #include "backend/ISOCompiler.hpp"
 #include "backend/BinCompiler.hpp"
+#include "backend/PspAnalyzer.hpp"
 
 #include <algorithm>
 #include <array>
@@ -284,8 +285,8 @@ namespace
     {
         std::cout << color("1;92")
                   << "\n  +============================================================+\n"
-                  << "  |  D E C O M P I L E X                         v0.4.0     |\n"
-                  << "  |  BINARY FORENSICS  /  ARCHIVE LAB  /  BUILD STUDIO        |\n"
+                  << "  |  D E C O M P I L E X                         v0.0.1     |\n"
+                  << "  |  PSP ANALYSIS  /  BINARY LAB  /  ARCHIVE STUDIO        |\n"
                   << "  +============================================================+\n"
                   << color("0")
                   << "  C++17  |  Offline analysis  |  Windows / Linux / Android\n";
@@ -310,7 +311,10 @@ namespace
                   << "   9  Compile C++                10  Detect compilers\n\n"
                   << color("1;92") << "  [ UTILITIES ]" << color("0") << "\n"
                   << "  11  Export hex dump            12  CLI reference\n"
-                  << "  16  Workspace dashboard         0  Exit\n\n";
+                  << "  16  Workspace dashboard         0  Exit\n\n"
+                  << color("1;92") << "  [ PSP GAME CODE ANALYZER ]" << color("0") << "\n"
+                  << "  21  Analyze PSP executable     22  Save PSP assembly report\n"
+                  << "  23  Scan extracted PSP folder\n\n";
     }
 
     std::uint32_t crc32File(const fs::path& path)
@@ -525,6 +529,10 @@ namespace
                   << "  DecompileX --bin-text <text> <output.bin>\n"
                   << "  DecompileX --bin-merge <output.bin> <input1> <input2> [...]\n"
                   << "  DecompileX --bin-view <file> [max-bytes]\n"
+                  << "  DecompileX --psp-analyze <EBOOT.PBP|EBOOT.BIN|ELF|PRX> [instructions]\n"
+                  << "  DecompileX --psp-report <file> <report.txt> [instructions]\n"
+                  << "  DecompileX --psp-scan <extracted-directory>\n"
+                  << "  PSP analysis reads at most 64 MiB per executable.\n"
                   << "  ISO output must be outside its source directory.\n";
     }
 
@@ -672,6 +680,106 @@ namespace
                   << DecompileX::BinCompiler::toHex(bytes) << "\n";
     }
 
+    constexpr std::uintmax_t PSP_MAX_BYTES = 64ull * 1024ull * 1024ull;
+
+    std::vector<std::uint8_t> readPspBinary(const fs::path& path)
+    {
+        std::error_code ec;
+        if (!fs::is_regular_file(path, ec) || ec)
+            throw std::runtime_error("PSP input is not a regular file.");
+        const auto size = fs::file_size(path, ec);
+        if (ec || size > PSP_MAX_BYTES)
+            throw std::runtime_error("PSP input exceeds 64 MiB or cannot be measured.");
+        std::ifstream input(path, std::ios::binary);
+        if (!input) throw std::runtime_error("Cannot open PSP executable.");
+        std::vector<std::uint8_t> data(static_cast<std::size_t>(size));
+        if (!data.empty())
+        {
+            input.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+            if (!input) throw std::runtime_error("Failed to read PSP executable.");
+        }
+        return data;
+    }
+
+    std::size_t pspInstructionLimit(const std::string& input)
+    {
+        if (input.empty()) return 160;
+        const auto count = parseUnsigned(input);
+        if (!count || *count < 1 || *count > 10000)
+            throw std::runtime_error("Instruction limit must be 1 to 10000.");
+        return static_cast<std::size_t>(*count);
+    }
+
+    std::string pspAnalysis(const fs::path& path, std::size_t instructions)
+    {
+        const auto data = readPspBinary(path);
+        std::ostringstream out;
+        out << "DecompileX PSP Game Code Analyzer v0.0.1\n"
+            << "Input: " << path.string() << "\n"
+            << "Bytes: " << data.size() << "\n"
+            << "----------------------------------------\n"
+            << DecompileX::PspAnalyzer::analyze(data, instructions) << '\n';
+        return out.str();
+    }
+
+    void savePspReport(const fs::path& input, const fs::path& output, std::size_t instructions)
+    {
+        std::error_code ec;
+        if (fs::exists(output, ec) && !ec && fs::equivalent(input, output, ec) && !ec)
+            throw std::runtime_error("Report cannot overwrite its input.");
+        const auto report = pspAnalysis(input, instructions);
+        std::ofstream file(output, std::ios::binary | std::ios::trunc);
+        if (!file) throw std::runtime_error("Cannot create report file.");
+        file << report;
+        file.close();
+        if (!file) throw std::runtime_error("Failed to write report.");
+        std::cout << "PSP report saved: " << output.string() << '\n';
+    }
+
+    void scanPspFolder(const fs::path& root)
+    {
+        std::error_code ec;
+        if (!fs::is_directory(root, ec) || ec)
+            throw std::runtime_error("PSP scan directory not found.");
+        std::size_t examined = 0, recognized = 0;
+        fs::recursive_directory_iterator it(root, fs::directory_options::skip_permission_denied, ec), end;
+        if (ec) throw std::runtime_error("Cannot enumerate directory.");
+        while (it != end && examined < 10000)
+        {
+            const auto entry = *it;
+            std::error_code statusError;
+            if (entry.is_symlink(statusError))
+            {
+                it.disable_recursion_pending();
+            }
+            else if (entry.is_regular_file(statusError))
+            {
+                ++examined;
+                const auto size = entry.file_size(statusError);
+                if (!statusError && size >= 4 && size <= PSP_MAX_BYTES)
+                {
+                    std::ifstream file(entry.path(), std::ios::binary);
+                    char header[4]{};
+                    if (file.read(header, 4))
+                    {
+                        const bool elf = header[0] == '\x7f' && header[1] == 'E' && header[2] == 'L' && header[3] == 'F';
+                        const bool pbp = header[0] == '\0' && header[1] == 'P' && header[2] == 'B' && header[3] == 'P';
+                        const bool psp = header[0] == '~' && header[1] == 'P' && header[2] == 'S' && header[3] == 'P';
+                        if (elf || pbp || psp)
+                        {
+                            ++recognized;
+                            std::cout << (elf ? "ELF " : pbp ? "PBP " : "PSP ") << entry.path().string() << '\n';
+                        }
+                    }
+                }
+            }
+            it.increment(ec);
+            if (ec) { ec.clear(); break; }
+        }
+        std::cout << "Files inspected: " << examined << ", PSP candidates: " << recognized << '\n';
+        if (examined >= 10000) std::cout << "Scan stopped at 10000 files.\n";
+    }
+
     int runInteractive()
     {
         std::optional<BinaryInfo> current;
@@ -770,6 +878,26 @@ namespace
                     if (!parsed || *parsed == 0 || *parsed > 4096) throw std::runtime_error("Invalid byte count.");
                     previewBin(file, static_cast<std::size_t>(*parsed));
                 }
+                else if (choice == "21")
+                {
+                    heading("PSP EXECUTABLE ANALYZER");
+                    const auto path = prompt("PSP EBOOT.PBP / EBOOT.BIN / ELF / PRX path: ");
+                    const auto limit = pspInstructionLimit(prompt("Instructions [160, max 10000]: "));
+                    std::cout << pspAnalysis(path, limit);
+                }
+                else if (choice == "22")
+                {
+                    heading("EXPORT PSP ASSEMBLY REPORT");
+                    const auto path = prompt("PSP executable path: ");
+                    const auto output = prompt("Output TXT path: ");
+                    if (path.empty() || output.empty()) throw std::runtime_error("Both paths are required.");
+                    savePspReport(path, output, pspInstructionLimit(prompt("Instructions [160]: ")));
+                }
+                else if (choice == "23")
+                {
+                    heading("SCAN EXTRACTED PSP GAME FOLDER");
+                    scanPspFolder(prompt("Extracted game directory: "));
+                }
                 else if (choice == "16")
                 {
                     heading("WORKSPACE DASHBOARD");
@@ -795,6 +923,21 @@ int main(int argc, char** argv)
     {
         if (argc < 2) return runInteractive();
         const std::string command = argv[1];
+        if (command == "--psp-analyze" && (argc == 3 || argc == 4))
+        {
+            std::cout << pspAnalysis(argv[2], argc == 4 ? pspInstructionLimit(argv[3]) : 160);
+            return 0;
+        }
+        if (command == "--psp-report" && (argc == 4 || argc == 5))
+        {
+            savePspReport(argv[2], argv[3], argc == 5 ? pspInstructionLimit(argv[4]) : 160);
+            return 0;
+        }
+        if (command == "--psp-scan" && argc == 3)
+        {
+            scanPspFolder(argv[2]);
+            return 0;
+        }
         if (command == "--help" || command == "-h") { showHelp(); return 0; }
         if (command == "--crc32" && argc == 3) { showCRC32(argv[2]); return 0; }
         if (command == "--compare" && argc == 4) { compareFiles(argv[2], argv[3]); return 0; }
