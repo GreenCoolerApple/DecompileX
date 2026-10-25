@@ -88,7 +88,7 @@ jobs:
           test -n "$SDKMANAGER"
           "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1" "ndk;$NDK_VERSION"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
-      - name: Verify Android v0.4.0 sources
+      - name: Verify Android v0.0.1 sources
         shell: bash
         run: |
           set -euo pipefail
@@ -96,6 +96,8 @@ jobs:
           grep -q 'Java_com_decompilex_app_MainActivity_hexDump' src/android/NativeBridge.cpp
           grep -q 'Java_com_decompilex_app_MainActivity_hexToBytes' src/android/NativeBridge.cpp
           grep -q 'DECOMPILEX_VERSION' CMakeLists.txt
+          grep -q 'Java_com_decompilex_app_MainActivity_findHex' src/android/NativeBridge.cpp
+          grep -q 'EXPORT REPORT AS .TXT' android/app/src/main/java/com/decompilex/app/MainActivity.java
       - name: Build APK
         working-directory: android
         run: gradle :app:assembleDebug --no-daemon --stacktrace
