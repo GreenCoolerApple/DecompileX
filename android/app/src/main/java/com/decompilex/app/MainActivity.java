@@ -395,44 +395,17 @@ public class MainActivity extends Activity {
         });
     }
 
-    private File stageSelectedIso(Uri uri) throws Exception {
-        File staged = File.createTempFile("decompilex-open-", ".iso", getCacheDir());
-        try {
-            try (InputStream source = getContentResolver().openInputStream(uri);
-                 FileOutputStream target = new FileOutputStream(staged)) {
-                if (source == null) throw new Exception("Unable to open ISO file.");
-                byte[] buffer = new byte[65536];
-                long bytes = 0;
-                int count;
-                while ((count = source.read(buffer)) != -1) {
-                    if (Thread.currentThread().isInterrupted()) throw new Exception("Interrupted.");
-                    bytes += count;
-                    if (bytes > 1024L * 1024 * 1024) throw new Exception("ISO exceeds 1 GiB limit.");
-                    target.write(buffer, 0, count);
-                }
-            }
-            return staged;
-        } catch (Exception error) {
-            staged.delete();
-            throw error;
-        }
-    }
-
     private void inspectIso(Uri uri) {
         showResult("OPEN ISO", "Reading ISO 9660 directory structure...");
         worker.execute(() -> {
-            File staged = null;
-            try {
-                staged = stageSelectedIso(uri);
-                String report = new IsoReader(staged).report();
+            try (IsoReader reader = new IsoReader(getContentResolver(), uri)) {
+                String report = reader.report();
                 selectedIso = uri;
                 runOnUiThread(() -> showResult("ISO CONTENTS", report));
             } catch (Exception error) {
                 selectedIso = null;
                 String message = error.getMessage();
                 runOnUiThread(() -> showResult("ISO ERROR", message == null ? "Unknown error" : message));
-            } finally {
-                if (staged != null) staged.delete();
             }
         });
     }
@@ -440,19 +413,15 @@ public class MainActivity extends Activity {
     private void extractOpenedIso(Uri destination) {
         Uri sourceUri = selectedIso;
         if (sourceUri == null) return;
-        showResult("ISO EXTRACTION", "Extracting files... Please wait.");
+        showResult("ISO EXTRACTION", "Extracting ISO in streaming mode. Please wait...");
         worker.execute(() -> {
-            File staged = null;
-            try {
-                staged = stageSelectedIso(sourceUri);
-                int count = new IsoReader(staged).extract(getContentResolver(), destination);
+            try (IsoReader reader = new IsoReader(getContentResolver(), sourceUri)) {
+                int count = reader.extract(getContentResolver(), destination);
                 String report = "Extracted " + count + " files to selected folder.";
                 runOnUiThread(() -> showResult("ISO EXTRACTED", report));
             } catch (Exception error) {
                 String message = error.getMessage();
                 runOnUiThread(() -> showResult("ISO ERROR", message == null ? "Unknown error" : message));
-            } finally {
-                if (staged != null) staged.delete();
             }
         });
     }
