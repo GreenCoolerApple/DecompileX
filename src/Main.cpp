@@ -1,15 +1,19 @@
 #include "backend/ExeCompiler.hpp"
 #include "backend/ZipGenerator.hpp"
+#include "backend/ISOCompiler.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -234,25 +238,160 @@ namespace
         }
     }
 
+    bool useColor()
+    {
+        static const bool enabled = [] {
+            if (std::getenv("NO_COLOR")) return false;
+#if defined(_WIN32)
+            return std::getenv("WT_SESSION") || std::getenv("ANSICON") || std::getenv("TERM");
+#else
+            const char* term = std::getenv("TERM");
+            return term && std::string(term) != "dumb";
+#endif
+        }();
+        return enabled;
+    }
+
+    std::string color(const char* code)
+    {
+        return useColor() ? std::string("\033[") + code + "m" : "";
+    }
+
+    void heading(const std::string& text)
+    {
+        std::cout << "\n" << color("1;92") << "  >> " << text
+                  << color("0") << "\n" << std::string(54, '-') << "\n";
+    }
+
     void printBanner()
     {
-        std::cout << "\n==============================================\n"
-                  << "          DecompileX  |  Toolkit\n"
-                  << "==============================================\n"
-                  << "Binary analysis, ZIP exports and C++ builds\n\n";
+        std::cout << color("1;92")
+                  << "\n  +======================================================+\n"
+                  << "  |  D E C O M P I L E X                    v0.2.0      |\n"
+                  << "  |  Binary Lab  /  Build Studio  /  Archive Tools      |\n"
+                  << "  +======================================================+\n"
+                  << color("0")
+                  << "  C++17  |  Windows / Android  |  Offline Toolkit\n";
     }
 
     void printMenu(const std::optional<BinaryInfo>& current)
     {
-        std::cout << "\nCurrent file: " << (current ? current->path.string() : "None") << "\n\n"
-                  << "  [1] Open binary\n"
-                  << "  [2] Show binary information\n"
-                  << "  [3] Hex dump\n"
-                  << "  [4] Export analysis ZIP\n"
-                  << "  [5] Create ZIP from directory\n"
-                  << "  [6] Compile C++ executable\n"
-                  << "  [7] Show compiler availability\n"
+        std::cout << "\n" << color("1;96") << "  ACTIVE  " << color("0")
+                  << (current ? current->path.filename().string() : "No binary loaded") << "\n"
+                  << "  ------------------------------------------------------\n"
+                  << color("1;92") << "  BINARY LAB" << color("0") << "\n"
+                  << "  [1] Open binary            [2] File information\n"
+                  << "  [3] Hex viewer             [4] Extract ASCII strings\n"
+                  << "  [5] Entropy analysis       [6] Export analysis ZIP\n\n"
+                  << color("1;92") << "  ARCHIVE STUDIO" << color("0") << "\n"
+                  << "  [7] Create ZIP             [8] Create ISO 9660\n\n"
+                  << color("1;92") << "  BUILD STUDIO" << color("0") << "\n"
+                  << "  [9] Compile C++            [10] Detect compilers\n\n"
+                  << color("1;92") << "  UTILITIES" << color("0") << "\n"
+                  << "  [11] Export hex dump       [12] Help / CLI commands\n"
                   << "  [0] Exit\n\n";
+    }
+
+    std::string extractStrings(const fs::path& path, std::size_t minLength, std::size_t maxResults)
+    {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) throw std::runtime_error("Cannot open binary.");
+        std::ostringstream out;
+        std::string current;
+        std::uint64_t position = 0;
+        std::uint64_t start = 0;
+        std::size_t found = 0;
+        char c;
+        while (file.get(c))
+        {
+            const auto b = static_cast<unsigned char>(c);
+            if (b >= 32 && b <= 126)
+            {
+                if (current.empty()) start = position;
+                if (current.size() < 2048) current.push_back(c);
+            }
+            else
+            {
+                if (current.size() >= minLength)
+                {
+                    out << "0x" << std::hex << start << std::dec << "  " << current << '\n';
+                    if (++found >= maxResults) break;
+                }
+                current.clear();
+            }
+            ++position;
+        }
+        if (found < maxResults && current.size() >= minLength)
+            out << "0x" << std::hex << start << std::dec << "  " << current << '\n';
+        return out.str();
+    }
+
+    void showEntropy(const fs::path& path)
+    {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) throw std::runtime_error("Cannot open binary.");
+        std::array<std::uint64_t, 256> frequency{};
+        std::array<char, 65536> buffer{};
+        std::uint64_t total = 0;
+        while (file)
+        {
+            file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const auto read = file.gcount();
+            for (std::streamsize i = 0; i < read; ++i)
+                ++frequency[static_cast<unsigned char>(buffer[static_cast<std::size_t>(i)])];
+            total += static_cast<std::uint64_t>(read);
+        }
+        if (total == 0) { std::cout << "Empty file.\n"; return; }
+        double entropy = 0;
+        for (auto count : frequency)
+        {
+            if (!count) continue;
+            const double probability = static_cast<double>(count) / static_cast<double>(total);
+            entropy -= probability * std::log2(probability);
+        }
+        std::cout << std::fixed << std::setprecision(4)
+                  << "  Shannon entropy: " << entropy << " / 8.0000 bits per byte\n"
+                  << "  Analyzed bytes:  " << total << "\n"
+                  << "  High entropy may indicate compression or encryption; it is not proof.\n";
+    }
+
+    void createISO()
+    {
+        const auto source = prompt("Source directory: ");
+        const auto target = prompt("Output ISO path: ");
+        const auto volume = prompt("Volume label [DECOMPILEX]: ");
+        if (source.empty() || target.empty())
+            throw std::runtime_error("Source directory and ISO output are required.");
+        const auto result = DecompileX::ISOCompiler::compile(
+            source, target, volume.empty() ? "DECOMPILEX" : volume);
+        if (!result.success) throw std::runtime_error(result.message);
+        std::cout << "  ISO created: " << target << "\n"
+                  << "  Files: " << result.filesAdded << " | Bytes: " << result.bytesWritten << "\n";
+    }
+
+    void saveHex(const BinaryInfo& info)
+    {
+        const auto path = prompt("Output TXT path [hex-dump.txt]: ");
+        const auto countText = prompt("Bytes [4096, max 1048576]: ");
+        const auto count = countText.empty() ? std::optional<std::uint64_t>(4096) : parseUnsigned(countText);
+        if (!count || *count > 1048576) throw std::runtime_error("Invalid byte count.");
+        std::ofstream output(path.empty() ? "hex-dump.txt" : path);
+        if (!output) throw std::runtime_error("Cannot create output file.");
+        hexDump(info.path, 0, static_cast<std::size_t>(*count), output);
+        if (!output) throw std::runtime_error("Failed to write hex dump.");
+        std::cout << "  Hex dump saved.\n";
+    }
+
+    void showHelp()
+    {
+        std::cout << "  DecompileX --help\n"
+                  << "  DecompileX --info <file>\n"
+                  << "  DecompileX --hex <file> [offset] [count]\n"
+                  << "  DecompileX --strings <file> [min-length]\n"
+                  << "  DecompileX --entropy <file>\n"
+                  << "  DecompileX --iso <directory> <output.iso> [volume]\n"
+                  << "  DecompileX --zip <directory> <output.zip>\n"
+                  << "  ISO output must be outside its source directory.\n";
     }
 
     void exportAnalysis(const BinaryInfo& info)
@@ -351,58 +490,73 @@ namespace
         while (std::cin)
         {
             printMenu(current);
-            const auto choice = prompt("DecompileX> ");
-            if (!std::cin)
-                break;
-            if (choice == "0" || choice == "exit" || choice == "quit")
-                break;
+            const auto choice = prompt("DecompileX > ");
+            if (!std::cin || choice == "0" || choice == "exit" || choice == "quit") break;
             try
             {
                 if (choice == "1")
                 {
                     const auto path = prompt("Binary path: ");
-                    if (path.empty())
-                        continue;
-                    auto selected = inspect(path);
-                    current = std::move(selected);
+                    if (path.empty()) continue;
+                    current = inspect(path);
+                    heading("BINARY LOADED");
                     std::cout << describe(*current);
                 }
                 else if (choice == "2")
                 {
-                    if (!current)
-                        throw std::runtime_error("Open a binary first.");
+                    if (!current) throw std::runtime_error("Open a binary first.");
+                    heading("FILE INFORMATION");
+                    current = inspect(current->path);
                     std::cout << describe(*current);
                 }
                 else if (choice == "3")
                 {
-                    if (!current)
-                        throw std::runtime_error("Open a binary first.");
-                    const auto offsetText = prompt("Offset (decimal or 0xHEX) [0]: ");
-                    const auto countText = prompt("Bytes to display [256, max 4096]: ");
+                    if (!current) throw std::runtime_error("Open a binary first.");
+                    const auto offsetText = prompt("Offset [0]: ");
+                    const auto countText = prompt("Bytes [256, max 4096]: ");
                     const auto offset = offsetText.empty() ? std::optional<std::uint64_t>(0) : parseUnsigned(offsetText);
                     const auto count = countText.empty() ? std::optional<std::uint64_t>(256) : parseUnsigned(countText);
-                    if (!offset || !count || *count > 4096)
-                        throw std::runtime_error("Invalid offset or byte count.");
+                    if (!offset || !count || *count > 4096) throw std::runtime_error("Invalid offset or byte count.");
+                    heading("HEX VIEWER");
                     hexDump(current->path, *offset, static_cast<std::size_t>(*count), std::cout);
                 }
                 else if (choice == "4")
                 {
-                    if (!current)
-                        throw std::runtime_error("Open a binary first.");
-                    exportAnalysis(*current);
+                    if (!current) throw std::runtime_error("Open a binary first.");
+                    const auto length = prompt("Minimum string length [5]: ");
+                    const auto value = length.empty() ? std::optional<std::uint64_t>(5) : parseUnsigned(length);
+                    if (!value || *value < 3 || *value > 1024) throw std::runtime_error("Invalid string length.");
+                    heading("ASCII STRINGS (FIRST 200)");
+                    std::cout << extractStrings(current->path, static_cast<std::size_t>(*value), 200);
                 }
                 else if (choice == "5")
-                    createDirectoryZip();
+                {
+                    if (!current) throw std::runtime_error("Open a binary first.");
+                    heading("ENTROPY ANALYSIS");
+                    showEntropy(current->path);
+                }
                 else if (choice == "6")
-                    compileCpp();
-                else if (choice == "7")
-                    showCompilers();
-                else
-                    std::cout << "Unknown option.\n";
+                {
+                    if (!current) throw std::runtime_error("Open a binary first.");
+                    heading("EXPORT ANALYSIS");
+                    exportAnalysis(*current);
+                }
+                else if (choice == "7") { heading("ZIP GENERATOR"); createDirectoryZip(); }
+                else if (choice == "8") { heading("ISO 9660 GENERATOR"); createISO(); }
+                else if (choice == "9") { heading("C++ COMPILER"); compileCpp(); }
+                else if (choice == "10") { heading("AVAILABLE COMPILERS"); showCompilers(); }
+                else if (choice == "11")
+                {
+                    if (!current) throw std::runtime_error("Open a binary first.");
+                    heading("EXPORT HEX DUMP");
+                    saveHex(*current);
+                }
+                else if (choice == "12") { heading("COMMAND LINE HELP"); showHelp(); }
+                else std::cout << "Unknown option.\n";
             }
             catch (const std::exception& error)
             {
-                std::cout << "Error: " << error.what() << '\n';
+                std::cout << color("1;91") << "  [ERROR] " << error.what() << color("0") << '\n';
             }
         }
         std::cout << "Goodbye!\n";
@@ -414,32 +568,49 @@ int main(int argc, char** argv)
 {
     try
     {
-        if (argc >= 2)
+        if (argc < 2) return runInteractive();
+        const std::string command = argv[1];
+        if (command == "--help" || command == "-h") { showHelp(); return 0; }
+        if (command == "--info" && argc == 3)
         {
-            const std::string command = argv[1];
-            if (command == "--help" || command == "-h")
-            {
-                std::cout << "DecompileX\nUsage:\n  DecompileX\n  DecompileX --info <file>\n  DecompileX --hex <file> [offset] [count]\n";
-                return 0;
-            }
-            if (command == "--info" && argc >= 3)
-            {
-                std::cout << describe(inspect(argv[2]));
-                return 0;
-            }
-            if (command == "--hex" && argc >= 3)
-            {
-                const auto offset = argc >= 4 ? parseUnsigned(argv[3]) : std::optional<std::uint64_t>(0);
-                const auto count = argc >= 5 ? parseUnsigned(argv[4]) : std::optional<std::uint64_t>(256);
-                if (!offset || !count || *count > 4096)
-                    throw std::runtime_error("Invalid offset or count (maximum 4096).");
-                hexDump(argv[2], *offset, static_cast<std::size_t>(*count), std::cout);
-                return 0;
-            }
-            std::cerr << "Invalid arguments. Use --help.\n";
-            return 2;
+            std::cout << describe(inspect(argv[2]));
+            return 0;
         }
-        return runInteractive();
+        if (command == "--hex" && argc >= 3 && argc <= 5)
+        {
+            const auto offset = argc >= 4 ? parseUnsigned(argv[3]) : std::optional<std::uint64_t>(0);
+            const auto count = argc >= 5 ? parseUnsigned(argv[4]) : std::optional<std::uint64_t>(256);
+            if (!offset || !count || *count > 4096) throw std::runtime_error("Invalid offset or count.");
+            hexDump(argv[2], *offset, static_cast<std::size_t>(*count), std::cout);
+            return 0;
+        }
+        if (command == "--strings" && argc >= 3 && argc <= 4)
+        {
+            const auto minLength = argc == 4 ? parseUnsigned(argv[3]) : std::optional<std::uint64_t>(5);
+            if (!minLength || *minLength < 3 || *minLength > 1024) throw std::runtime_error("Invalid minimum string length.");
+            std::cout << extractStrings(argv[2], static_cast<std::size_t>(*minLength), 500);
+            return 0;
+        }
+        if (command == "--entropy" && argc == 3) { showEntropy(argv[2]); return 0; }
+        if (command == "--iso" && argc >= 4 && argc <= 5)
+        {
+            const auto result = DecompileX::ISOCompiler::compile(argv[2], argv[3], argc == 5 ? argv[4] : "DECOMPILEX");
+            if (!result.success) throw std::runtime_error(result.message);
+            std::cout << "ISO created: " << argv[3] << " (" << result.filesAdded << " files)\n";
+            return 0;
+        }
+        if (command == "--zip" && argc == 4)
+        {
+            DecompileX::ZipGenerator zip;
+            if (!zip.create(argv[3])) throw std::runtime_error("Cannot create ZIP.");
+            const bool added = zip.addDirectory(argv[2]);
+            const bool closed = zip.close();
+            if (!added || !closed) throw std::runtime_error("ZIP generation failed.");
+            std::cout << "ZIP created: " << argv[3] << '\n';
+            return 0;
+        }
+        std::cerr << "Invalid arguments. Use --help.\n";
+        return 2;
     }
     catch (const std::exception& error)
     {
